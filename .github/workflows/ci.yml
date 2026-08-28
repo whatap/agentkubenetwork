@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.7
+          cache: true
+      - name: Install eBPF compiler
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: Generate eBPF objects
+        run: make generate-ebpf
+      - name: Verify generated eBPF objects are current
+        run: git diff --exit-code -- internal/collector/network_bpfel.go internal/collector/network_bpfel.o
+      - name: Verify
+        run: make check
