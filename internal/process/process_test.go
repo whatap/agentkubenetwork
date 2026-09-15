@@ -80,34 +80,63 @@ func TestLookupLeavesContainerIDEmptyForHostProcess(t *testing.T) {
 	}
 }
 
-func TestLookupCachesUntilTTLThenDetectsPIDReuse(t *testing.T) {
+func TestLookupDetectsPIDReuseInsideTTL(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
 	resolver := NewResolver(root, WithTTL(10*time.Second), withClock(func() time.Time { return now }))
-
-	writeProc(t, root, 500, "python3", 100, []string{"python3", "client.py"}, "")
-	first, _ := resolver.Lookup(500)
-
-	// Replace the process behind the PID; within TTL the cache still answers.
-	writeProc(t, root, 500, "curl", 200, []string{"curl"}, "")
-	cached, _ := resolver.Lookup(500)
-	if cached.Comm != first.Comm || cached.StartTimeTicks != 100 {
-		t.Fatalf("expected cached identity within TTL, got %+v", cached)
+	containerB := strings.Repeat("b", 64)
+	writeProc(t, root, 500, "python3", 100, []string{"python3", "client.py"}, "0::/docker/"+containerID)
+	first, ok := resolver.Lookup(500)
+	if !ok || first.StartTimeTicks != 100 || first.ContainerID != containerID {
+		t.Fatalf("initial identity missing: %+v ok=%v", first, ok)
 	}
 
-	now = now.Add(11 * time.Second)
+	// TTL caches metadata, never proof that a numeric PID is still alive.
+	writeProc(t, root, 500, "curl", 200, []string{"curl"}, "0::/docker/"+containerB)
 	fresh, ok := resolver.Lookup(500)
-	if !ok || fresh.Comm != "curl" || fresh.StartTimeTicks != 200 {
-		t.Fatalf("expected reused PID to resolve to new process, got %+v", fresh)
+	if !ok || fresh.Comm != "curl" || fresh.StartTimeTicks != 200 || fresh.ContainerID != containerB {
+		t.Fatalf("PID reuse inside TTL returned stale identity: %+v ok=%v", fresh, ok)
 	}
 
-	// Process exit drops the cache entry instead of serving stale identity.
-	now = now.Add(11 * time.Second)
+	// Exit must invalidate even an unexpired positive cache entry.
 	if err := os.RemoveAll(filepath.Join(root, "500")); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := resolver.Lookup(500); ok {
-		t.Fatal("exited process must not resolve")
+		t.Fatal("exited process must not resolve inside TTL")
+	}
+}
+
+func TestLookupRejectsUnreadableGenerationInsideTTL(t *testing.T) {
+	for _, kind := range []string{"missing", "directory", "malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			writeProc(t, root, 500, "python3", 100, nil, "0::/docker/"+containerID)
+			resolver := NewResolver(root)
+			if _, ok := resolver.Lookup(500); !ok {
+				t.Fatal("initial lookup failed")
+			}
+			stat := filepath.Join(root, "500", "stat")
+			if err := os.Remove(stat); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "directory":
+				if err := os.Mkdir(stat, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if err := os.WriteFile(stat, []byte("unreadable generation"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, ok := resolver.Lookup(500); ok {
+				t.Fatalf("unverified cached identity: %+v", got)
+			}
+			if _, ok := resolver.cache[500]; ok {
+				t.Fatal("unverified cache entry retained")
+			}
+		})
 	}
 }
 

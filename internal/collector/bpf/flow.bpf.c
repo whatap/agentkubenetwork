@@ -135,12 +135,10 @@ struct tcp_sock {
 	__u32 mdev_us;
 } __attribute__((preserve_access_index));
 
-// Minimal msghdr/iov_iter views used to read the first datagram buffer passed
-// to udp_sendmsg. glibc resolvers issue DNS queries through sendmmsg, which the
-// syscall tracepoints cannot see as a flat buffer, so the query payload is
-// read at the socket layer instead. The iovec pointer was renamed from `iov`
-// to `__iov` in Linux 6.4 and single-segment iterators became ITER_UBUF; the
-// loader picks whichever field exists in the running kernel's BTF.
+// Minimal CO-RE field views, not literal kernel layouts. Linux 5.14 uses
+// iter_type/iov; 6.1 also has ITER_UBUF; 6.4 renames iov to __iov; 6.8
+// reorders enum iter_type. Always relocate enum values. Older type-bitfield
+// iterators (e.g. 5.10) are deliberately unsupported and fail closed.
 struct iovec {
 	void *iov_base;
 	__u64 iov_len;
@@ -148,6 +146,9 @@ struct iovec {
 
 struct iov_iter {
 	__u8 iter_type;
+	__u64 iov_offset;
+	__u64 count;
+	unsigned long nr_segs;
 	const struct iovec *iov;
 	const struct iovec *__iov;
 	void *ubuf;
@@ -155,6 +156,7 @@ struct iov_iter {
 
 struct msghdr {
 	void *msg_name;
+	int msg_namelen;
 	struct iov_iter msg_iter;
 } __attribute__((preserve_access_index));
 
@@ -165,7 +167,9 @@ struct sockaddr_in___local {
 };
 
 enum iter_type {
-	ITER_UBUF = 0xff,
+	// Linux 6.8 values; runtime comparisons use CO-RE enum relocations.
+	ITER_UBUF = 0,
+	ITER_IOVEC = 1,
 };
 
 // Stable 360-byte ring-buffer ABI mirrored by collector.wireEvent.
@@ -639,10 +643,15 @@ static __always_inline int finish_io(struct trace_event_raw_sys_exit *ctx) {
 		return 0;
 	complete_recvfrom_peer(&copy);
 	__u32 length = (__u64)result > copy.requested ? copy.requested : (__u32)result;
-	const struct socket_tuple *tuple = 0;
-	if (copy.tuple.family == AF_INET || copy.tuple.family == AF_INET6)
-		tuple = &copy.tuple;
-	if (tuple != 0 && tuple->protocol == IPPROTO_UDP) {
+	// read/write also observe regular files. Without the in-flight socket
+	// hook's tuple, an FD is not socket identity: it may be reused before
+	// userspace handles this event. Never classify or emit that payload.
+	if (copy.tuple.family != AF_INET && copy.tuple.family != AF_INET6)
+		return 0;
+	const struct socket_tuple *tuple = &copy.tuple;
+	if (tuple->protocol != IPPROTO_TCP && tuple->protocol != IPPROTO_UDP)
+		return 0;
+	if (tuple->protocol == IPPROTO_UDP) {
 		// Sends were already emitted from udp_sendmsg (covers sendmmsg too).
 		if (copy.direction == DIRECTION_SEND)
 			return 0;
@@ -653,22 +662,34 @@ static __always_inline int finish_io(struct trace_event_raw_sys_exit *ctx) {
 		EVENT_SOURCE_KERNEL_PLAINTEXT, 0, tuple);
 }
 
-// user_buffer_of reads the userspace address of the first buffer segment in a
-// msghdr iterator. Returns 0 when the iterator shape is not a plain user
-// buffer (kernel kvec/bvec senders such as sunrpc).
-static __always_inline const void *user_buffer_of(struct msghdr *msg) {
+// Only return a user range containing the ENTIRE datagram. Do not flatten a
+// scatter/gather iterator by reading past its first segment, or relabel an
+// incomplete prefix as a complete datagram. Unsupported shapes fail closed.
+static __always_inline const void *user_buffer_of(struct msghdr *msg, __u64 length) {
 	struct iov_iter *iter = &msg->msg_iter;
+	__u8 iter_type = 0;
+	__u64 offset = 0, count = 0;
+	if (!bpf_core_field_exists(iter->iter_type) ||
+		bpf_core_read(&iter_type, sizeof(iter_type), &iter->iter_type) < 0 ||
+		bpf_core_read(&offset, sizeof(offset), &iter->iov_offset) < 0 ||
+		bpf_core_read(&count, sizeof(count), &iter->count) < 0 ||
+		length == 0 || length > count)
+		return 0;
 	if (bpf_core_field_exists(iter->ubuf) && bpf_core_enum_value_exists(enum iter_type, ITER_UBUF)) {
-		__u8 iter_type = 0;
-		if (bpf_core_read(&iter_type, sizeof(iter_type), &iter->iter_type) < 0)
-			return 0;
 		if (iter_type == bpf_core_enum_value(enum iter_type, ITER_UBUF)) {
 			void *ubuf = 0;
-			if (bpf_core_read(&ubuf, sizeof(ubuf), &iter->ubuf) < 0)
+			if (bpf_core_read(&ubuf, sizeof(ubuf), &iter->ubuf) < 0 ||
+				ubuf == 0 || offset > ~0ULL - (__u64)ubuf)
 				return 0;
-			return ubuf;
+			return (const __u8 *)ubuf + offset;
 		}
 	}
+	if (!bpf_core_enum_value_exists(enum iter_type, ITER_IOVEC) ||
+		iter_type != bpf_core_enum_value(enum iter_type, ITER_IOVEC))
+		return 0;
+	unsigned long segments = 0;
+	if (bpf_core_read(&segments, sizeof(segments), &iter->nr_segs) < 0 || segments == 0)
+		return 0;
 	const struct iovec *vector = 0;
 	if (bpf_core_field_exists(iter->__iov)) {
 		if (bpf_core_read(&vector, sizeof(vector), &iter->__iov) < 0)
@@ -680,13 +701,17 @@ static __always_inline const void *user_buffer_of(struct msghdr *msg) {
 	if (vector == 0)
 		return 0;
 	void *base = 0;
-	if (bpf_core_read(&base, sizeof(base), &vector->iov_base) < 0)
+	__u64 capacity = 0;
+	if (bpf_core_read(&base, sizeof(base), &vector->iov_base) < 0 ||
+		bpf_core_read(&capacity, sizeof(capacity), &vector->iov_len) < 0 ||
+		base == 0 || offset > capacity || length > capacity - offset ||
+		offset > ~0ULL - (__u64)base)
 		return 0;
-	return base;
+	return (const __u8 *)base + offset;
 }
 
 // observe_udp_send emits the outgoing datagram as a DNS query candidate when
-// the socket (or the explicit msg_name for unconnected sockets) targets a DNS
+// the socket (or an overriding explicit msg_name) targets a DNS
 // port. This covers sendmsg/sendmmsg senders that the syscall tracepoints
 // cannot decode; finish_io skips UDP sends to avoid double emission.
 static __always_inline int observe_udp_send(struct sock *sk, struct msghdr *msg, __u64 length) {
@@ -694,24 +719,32 @@ static __always_inline int observe_udp_send(struct sock *sk, struct msghdr *msg,
 	if (read_socket_tuple(&tuple, sk) < 0)
 		return 0;
 	tuple.protocol = IPPROTO_UDP;
-	if (tuple.remote_port == 0 && tuple.family == AF_INET) {
-		void *name = 0;
-		if (bpf_core_read(&name, sizeof(name), &msg->msg_name) == 0 && name != 0) {
-			struct sockaddr_in___local address = {};
-			if (bpf_probe_read_kernel(&address, sizeof(address), name) == 0 &&
-				address.sin_family == AF_INET) {
-				tuple.remote_port = network_to_host_port(address.sin_port);
-				__builtin_memcpy(tuple.remote_address, &address.sin_addr, 4);
-			}
-		}
+	void *name = 0;
+	if (bpf_core_read(&name, sizeof(name), &msg->msg_name) < 0)
+		return 0;
+	if (name != 0) {
+		// udp_sendmsg validates a full 16-byte sockaddr_in, not just the
+		// 8-byte prefix we need. Unsupported families fail closed, including
+		// dual-stack explicit destinations; never reuse the connected peer.
+		int name_length = 0;
+		struct sockaddr_in___local address = {};
+		if (tuple.family != AF_INET ||
+			bpf_core_read(&name_length, sizeof(name_length), &msg->msg_namelen) < 0 ||
+			name_length < 16 ||
+			bpf_probe_read_kernel(&address, sizeof(address), name) < 0 ||
+			address.sin_family != AF_INET || address.sin_port == 0)
+			return 0;
+		tuple.remote_port = network_to_host_port(address.sin_port);
+		__builtin_memcpy(tuple.remote_address, &address.sin_addr, 4);
 	}
 	if (!is_dns_port(tuple.remote_port) && !is_dns_port(tuple.local_port))
 		return 0;
-	const void *buffer = user_buffer_of(msg);
+	if (length < DNS_HEADER_SIZE || length > 0xffffU)
+		return 0;
+	const void *buffer = user_buffer_of(msg, length);
 	if (buffer == 0)
 		return 0;
-	__u32 bounded = length > 0xffffU ? 0xffffU : (__u32)length;
-	return emit_dns_fragment(0, buffer, bounded, DIRECTION_SEND, &tuple);
+	return emit_dns_fragment(0, buffer, (__u32)length, DIRECTION_SEND, &tuple);
 }
 
 // remember_udp_socket_context marks the in-flight syscall as UDP so finish_io

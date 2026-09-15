@@ -14,9 +14,10 @@ import (
 // records, never silently coerced into TCP latency or healthy empty buckets.
 type eventOutput struct {
 	*queuedOutput
-	stream *flow.Stream
-	mode   string
-	node   string
+	stream      *flow.Stream
+	mode        string
+	node        string
+	captureTime func() time.Time
 }
 
 func newEventOutput(output io.Writer, node string, now func() time.Time, options EventOptions) (*eventOutput, error) {
@@ -43,7 +44,7 @@ func newEventOutput(output io.Writer, node string, now func() time.Time, options
 	if err != nil {
 		return nil, err
 	}
-	return &eventOutput{queuedOutput: queue, stream: stream, mode: mode, node: node}, nil
+	return &eventOutput{queuedOutput: queue, stream: stream, mode: mode, node: node, captureTime: now}, nil
 }
 
 func (e *eventOutput) Encode(record any) error {
@@ -100,7 +101,7 @@ func (e *eventOutput) Flush(now time.Time) error {
 func (e *eventOutput) Close() error {
 	var finalErr error
 	if e.stream != nil {
-		for _, window := range e.stream.Finish(e.now()) {
+		for _, window := range e.stream.Finish(e.captureTime()) {
 			if err := e.queuedOutput.Encode(window); err != nil {
 				finalErr = err
 				break

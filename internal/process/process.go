@@ -55,8 +55,8 @@ type Resolver struct {
 // Option customises a Resolver.
 type Option func(*Resolver)
 
-// WithTTL bounds how long a resolved identity is reused before /proc is
-// re-read to confirm the PID still belongs to the same process.
+// WithTTL bounds metadata reuse. PID start time is checked on every lookup,
+// including cache hits; TTL alone is never evidence of process generation.
 func WithTTL(ttl time.Duration) Option {
 	return func(resolver *Resolver) {
 		if ttl > 0 {
@@ -115,7 +115,16 @@ func (resolver *Resolver) Lookup(pid uint32) (flow.Process, bool) {
 	cached, ok := resolver.cache[pid]
 	resolver.mu.Unlock()
 	if ok && now.Before(cached.expiresAt) {
-		return cached.process, true
+		_, startTime, err := readStat(resolver.root, pid)
+		if err != nil {
+			resolver.mu.Lock()
+			delete(resolver.cache, pid)
+			resolver.mu.Unlock()
+			return flow.Process{}, false
+		}
+		if startTime == cached.process.StartTimeTicks {
+			return cached.process, true
+		}
 	}
 
 	process, err := readProcess(resolver.root, pid, resolver.maxCmdline)
@@ -125,9 +134,9 @@ func (resolver *Resolver) Lookup(pid uint32) (flow.Process, bool) {
 		resolver.mu.Unlock()
 		return flow.Process{}, false
 	}
-	// A start-time mismatch against the expired cache entry means the PID was
-	// reused by a different process; the fresh read simply replaces it.
+	// A new generation replaces even an unexpired metadata cache entry.
 	resolver.mu.Lock()
+	delete(resolver.cache, pid)
 	if len(resolver.cache) >= resolver.maxEntries {
 		resolver.evictExpiredLocked(now)
 	}
@@ -148,13 +157,9 @@ func (resolver *Resolver) evictExpiredLocked(now time.Time) {
 
 func readProcess(root string, pid uint32, maxCmdline int) (flow.Process, error) {
 	dir := filepath.Join(root, strconv.FormatUint(uint64(pid), 10))
-	stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+	comm, startTime, err := readStat(root, pid)
 	if err != nil {
 		return flow.Process{}, err
-	}
-	comm, startTime, err := parseStat(stat)
-	if err != nil {
-		return flow.Process{}, fmt.Errorf("parse %s/stat: %w", dir, err)
 	}
 	process := flow.Process{
 		PID:            pid,
@@ -168,7 +173,29 @@ func readProcess(root string, pid uint32, maxCmdline int) (flow.Process, error) 
 	if cgroup, err := os.ReadFile(filepath.Join(dir, "cgroup")); err == nil {
 		process.ContainerID = ParseContainerID(string(cgroup))
 	}
+	// Separate proc files are not an atomic snapshot. Reject the whole read
+	// if the PID exited, became unreadable, or changed while assembling it.
+	_, finalStartTime, err := readStat(root, pid)
+	if err != nil {
+		return flow.Process{}, err
+	}
+	if finalStartTime != startTime {
+		return flow.Process{}, errors.New("process generation changed during lookup")
+	}
 	return process, nil
+}
+
+func readStat(root string, pid uint32) (string, uint64, error) {
+	path := filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "stat")
+	stat, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	comm, startTime, err := parseStat(stat)
+	if err != nil {
+		return "", 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return comm, startTime, nil
 }
 
 // parseStat extracts comm (field 2, parenthesised, may contain spaces) and

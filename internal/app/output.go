@@ -34,7 +34,7 @@ type queuedOutput struct {
 	drainTimeout time.Duration
 	mu           sync.Mutex
 	err          error
-	lost         atomic.Uint64
+	reportedLost uint64 // owned only by the writer goroutine
 	totalLost    atomic.Uint64
 }
 
@@ -74,7 +74,6 @@ func (q *queuedOutput) Encode(value any) error {
 	select {
 	case q.queue <- buffer.Bytes():
 	default:
-		q.lost.Add(1)
 		q.totalLost.Add(1)
 	}
 	return nil
@@ -92,10 +91,14 @@ func (q *queuedOutput) write(record []byte) error {
 }
 
 func (q *queuedOutput) writeLoss() error {
-	count := q.lost.Swap(0)
+	// Derive delta and total from one atomic snapshot. Independent counters
+	// can expose a drop in one field before it appears in the other.
+	total := q.totalLost.Load()
+	count := total - q.reportedLost
 	if count == 0 {
 		return nil
 	}
+	q.reportedLost = total
 	record, err := json.Marshal(struct {
 		SchemaVersion       string    `json:"schemaVersion"`
 		ObservedAt          time.Time `json:"observedAt"`
@@ -103,7 +106,7 @@ func (q *queuedOutput) writeLoss() error {
 		Reason              string    `json:"reason"`
 		DroppedRecords      uint64    `json:"droppedRecords"`
 		TotalDroppedRecords uint64    `json:"totalDroppedRecords"`
-	}{"network.output.drop/v1alpha1", q.now(), q.nodeName, "output_queue_full", count, q.totalLost.Load()})
+	}{"network.output.drop/v1alpha1", q.now(), q.nodeName, "output_queue_full", count, total})
 	if err != nil {
 		return err
 	}

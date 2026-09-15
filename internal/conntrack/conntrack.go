@@ -36,8 +36,9 @@ const (
 	nlmsgHeaderLength = 16
 	nfgenmsgLength    = 4
 
-	nlmsgError = 2
-	nlmsgDone  = 3
+	nlmsgError   = 2
+	nlmsgDone    = 3
+	nlmFDumpIntr = 0x10
 
 	protocolNumberTCP = 6
 	protocolNumberUDP = 17
@@ -230,21 +231,36 @@ func protocolNumber(protocol string) (uint8, bool) {
 // was seen.
 func parseMessages(data []byte) ([]Entry, bool, error) {
 	var entries []Entry
+	done := false
 	for len(data) >= nlmsgHeaderLength {
 		length := int(binary.NativeEndian.Uint32(data[0:4]))
 		messageType := binary.NativeEndian.Uint16(data[4:6])
 		if length < nlmsgHeaderLength || length > len(data) {
-			return entries, false, fmt.Errorf("invalid netlink message length %d", length)
+			return nil, false, fmt.Errorf("invalid netlink message length %d", length)
+		}
+		if binary.NativeEndian.Uint16(data[6:8])&nlmFDumpIntr != 0 {
+			return nil, false, fmt.Errorf("interrupted conntrack dump")
 		}
 		payload := data[nlmsgHeaderLength:length]
 		switch messageType {
 		case nlmsgDone:
-			return entries, true, nil
-		case nlmsgError:
-			if len(payload) >= 4 {
-				if code := int32(binary.NativeEndian.Uint32(payload[0:4])); code != 0 {
-					return entries, false, fmt.Errorf("netlink error %d", code)
+			// Modern kernels put a signed errno in DONE, not only ERROR.
+			// A terminator is not proof that the multipart dump succeeded.
+			if len(payload) != 0 {
+				if len(payload) < 4 {
+					return nil, false, fmt.Errorf("short netlink done status")
 				}
+				if code := int32(binary.NativeEndian.Uint32(payload[:4])); code != 0 {
+					return nil, false, fmt.Errorf("netlink dump error %d", code)
+				}
+			}
+			done = true
+		case nlmsgError:
+			if len(payload) < 4 {
+				return nil, false, fmt.Errorf("short netlink error status")
+			}
+			if code := int32(binary.NativeEndian.Uint32(payload[0:4])); code != 0 {
+				return nil, false, fmt.Errorf("netlink error %d", code)
 			}
 		default:
 			if len(payload) > nfgenmsgLength {
@@ -253,9 +269,15 @@ func parseMessages(data []byte) ([]Entry, bool, error) {
 				}
 			}
 		}
+		if align4(length) > len(data) {
+			return nil, false, fmt.Errorf("truncated netlink message padding")
+		}
 		data = data[align4(length):]
 	}
-	return entries, false, nil
+	if len(data) != 0 {
+		return nil, false, fmt.Errorf("truncated netlink message header")
+	}
+	return entries, done, nil
 }
 
 func parseEntry(data []byte) (Entry, bool) {
