@@ -2,34 +2,33 @@ package collector
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
 
-func TestBPFIOExitFallsBackToUserspaceTupleResolution(t *testing.T) {
-	source, err := os.ReadFile("bpf/flow.bpf.c")
+// This executes the actual C helper bodies with host-only BPF/CO-RE shims.
+// It does not load BPF, validate relocations, or claim Linux verifier coverage.
+func TestBPFProductionHelperSafety(t *testing.T) {
+	python, err := exec.LookPath("python3")
 	if err != nil {
-		t.Fatalf("read BPF source: %v", err)
+		t.Skip("host BPF regressions require python3")
 	}
-	text := string(source)
-	start := strings.Index(text, "static __always_inline int finish_io")
-	end := strings.Index(text[start:], "static __always_inline void remember_socket_context")
-	if start < 0 || end < 0 {
-		t.Fatal("finish_io function not found")
+	clang := os.Getenv("CLANG")
+	if clang == "" {
+		clang = "clang"
 	}
-	finishIO := text[start : start+end]
-
-	for _, required := range []string{
-		"const struct socket_tuple *tuple = 0;",
-		"tuple = &copy.tuple;",
-		"EVENT_SOURCE_KERNEL_PLAINTEXT, 0, tuple",
-	} {
-		if !strings.Contains(finishIO, required) {
-			t.Fatalf("finish_io missing tuple fallback contract %q", required)
-		}
+	if _, err := exec.LookPath(clang); err != nil {
+		t.Skip("host BPF regressions require clang and its sanitizer runtime")
 	}
-	if strings.Contains(finishIO, "copy.tuple.family != AF_INET && copy.tuple.family != AF_INET6)\n		return 0") {
-		t.Fatal("finish_io silently discards classified payload when the fentry tuple bridge is unavailable")
+	for _, name := range []string{"scatter", "identity", "destination"} {
+		t.Run(name, func(t *testing.T) {
+			output, err := exec.Command(python, "testdata/bpf_safety/run.py", "--case", name).CombinedOutput()
+			if err != nil {
+				t.Fatalf("production BPF helper regression: %v\n%s", err, output)
+			}
+			t.Log(string(output))
+		})
 	}
 }
 

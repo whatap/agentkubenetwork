@@ -5,6 +5,7 @@ package conntrack
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -14,6 +15,7 @@ const (
 	nfnlSubsysCtnetlink = 1
 	ipctnlMsgCtGet      = 1
 	nfnetlinkV0         = 0
+	netlinkDumpTimeout  = time.Second
 )
 
 // NewNetlinkResolver returns a Resolver backed by ctnetlink dumps of the
@@ -36,10 +38,31 @@ func dumpNetlink() ([]Entry, error) {
 		return nil, fmt.Errorf("send conntrack dump request: %w", err)
 	}
 
+	return receiveNetlinkDump(fd)
+}
+
+func receiveNetlinkDump(fd int) ([]Entry, error) {
 	buffer := make([]byte, 1<<16)
 	var entries []Entry
+	deadline := time.Now().Add(netlinkDumpTimeout)
 	for {
+		// Bound the whole multipart dump, not each datagram independently:
+		// trickling entries without DONE must not keep a stale dump alive.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("receive conntrack dump: %w", os.ErrDeadlineExceeded)
+		}
+		timeout := unix.NsecToTimeval(remaining.Nanoseconds())
+		if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &timeout); err != nil {
+			return nil, fmt.Errorf("set conntrack receive timeout: %w", err)
+		}
 		length, _, err := unix.Recvfrom(fd, buffer, 0)
+		if err == unix.EINTR {
+			continue
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("receive conntrack dump: %w", os.ErrDeadlineExceeded)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("receive conntrack dump: %w", err)
 		}

@@ -17,8 +17,8 @@ jobs:
         with:
           go-version: 1.25.7
           cache: true
-      - name: Install eBPF compiler
-        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: Install eBPF compiler and safety-test runtimes
+        run: sudo apt-get update && sudo apt-get install -y clang llvm python3 libclang-rt-18-dev
       - name: Generate eBPF objects
         run: make generate-ebpf
       - name: Verify generated eBPF objects are current

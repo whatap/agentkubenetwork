@@ -54,38 +54,53 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, encoder.Close()) }()
+	var readErr error
+	defer func() { retErr = errors.Join(readErr, retErr, encoder.Close()) }()
 	correlator := l7.NewCorrelator(l7.Config{})
 	dnsCorrelator := dns.NewCorrelator(0)
 	defer func() {
-		for _, transaction := range dnsCorrelator.Finish(now()) {
+		for _, transaction := range dnsCorrelator.Finish(encoder.captureTime()) {
 			if err := encoder.Encode(transaction); err != nil {
 				retErr = errors.Join(retErr, err)
 				break
 			}
 		}
 	}()
-	stream, cancel := pumpEvents(reader, maxEvents, now)
+	stream, cancel, capture := pumpEvents(reader, maxEvents, now)
+	encoder.captureTime = capture.time
 	defer cancel()
 	ticker := time.NewTicker(resolutionRetryInterval)
 	defer ticker.Stop()
 	pending := make([]pendingResolution, 0)
-	var readErr error
+	cancelled := false
+	ctxDone := ctx.Done()
+	retryTick := ticker.C
 	for stream != nil || len(pending) > 0 {
-		var incoming timedEvent
-		select {
-		case <-ctx.Done():
-			// Finalize accepted observations before closing output. Cancellation
-			// is graceful, but enqueue and writer/drain errors remain errors.
+		if cancelled && stream == nil {
 			for _, item := range pending {
 				if err := encoder.Encode(resolutionRecord(item, "capture_ended")); err != nil {
 					return fmt.Errorf("finalize pending observation: %w", err)
 				}
 			}
 			return nil
+		}
+		var incoming timedEvent
+		select {
+		case <-ctxDone:
+			// Stop and join before draining every successful Read, including
+			// the event blocked behind the bounded pump queue.
+			accepted := cancel()
+			tail := make(chan timedEvent, len(accepted))
+			for _, event := range accepted {
+				tail <- event
+			}
+			close(tail)
+			stream = tail
+			cancelled, ctxDone, retryTick = true, nil, nil
+			continue
 		case <-encoder.failed:
 			return fmt.Errorf("write event output: %w", encoder.Err())
-		case <-ticker.C:
+		case <-retryTick:
 			remaining := pending[:0]
 			for _, item := range pending {
 				resolveObservation(resolver, &item.observation)
@@ -100,12 +115,18 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			}
 			clear(pending[len(remaining):])
 			pending = remaining
-			for _, transaction := range dnsCorrelator.Expire(now()) {
+			for _, transaction := range dnsCorrelator.Expire(capture.watermark()) {
 				if err := encoder.Encode(transaction); err != nil {
 					return fmt.Errorf("expire DNS transaction: %w", err)
 				}
 			}
-			if err := encoder.Flush(now()); err != nil {
+			watermark := capture.watermark()
+			for _, item := range pending {
+				if item.observation.ObservedAt.Before(watermark) {
+					watermark = item.observation.ObservedAt
+				}
+			}
+			if err := encoder.Flush(watermark); err != nil {
 				return fmt.Errorf("flush flow windows: %w", err)
 			}
 			continue
@@ -115,6 +136,7 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 				continue
 			}
 			incoming = value
+			capture.consume()
 		}
 		if incoming.err != nil {
 			if !errors.Is(incoming.err, io.EOF) {
@@ -220,7 +242,7 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			return fmt.Errorf("encode BPF observation: %w", err)
 		}
 	}
-	return readErr
+	return nil
 }
 
 // attachProcess records which userspace process issued the sampled socket

@@ -65,6 +65,8 @@ type http2HeaderBlock struct {
 
 type http2DirectionState struct {
 	buffer               []byte
+	bufferStartedNS      uint64
+	bufferIdentity       observationIdentity
 	lastSeenNS           uint64
 	poisoned             bool
 	continuationStream   uint32
@@ -90,6 +92,10 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64, obser
 		state.resetFrameState()
 		return nil, errors.New(DropInvalidHTTP2)
 	}
+	if len(state.buffer) == 0 && len(payload) != 0 {
+		state.bufferStartedNS = timestampNS
+		state.bufferIdentity = identityFrom(observation)
+	}
 	state.buffer = append(state.buffer, payload...)
 
 	var blocks []http2HeaderBlock
@@ -110,7 +116,18 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64, obser
 		flags := state.buffer[4]
 		streamID := binary.BigEndian.Uint32(state.buffer[5:9]) & 0x7fffffff
 		framePayload := state.buffer[9 : 9+length]
+		frameStartedNS, frameIdentity := state.bufferStartedNS, state.bufferIdentity
 		state.buffer = state.buffer[9+length:]
+		// feed drains every complete frame. Any bytes retained from a previous
+		// feed belonged only to this frame; all following bytes came from the
+		// current observation. Carry its snapshot into the next partial frame.
+		if len(state.buffer) != 0 {
+			state.bufferStartedNS = timestampNS
+			state.bufferIdentity = identityFrom(observation)
+		} else {
+			state.bufferStartedNS = 0
+			state.bufferIdentity = observationIdentity{}
+		}
 
 		switch frameType {
 		case http2FrameHeaders:
@@ -130,14 +147,14 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64, obser
 				if err != nil {
 					return blocks, fmt.Errorf("%s: %w", DropInvalidHTTP2, err)
 				}
-				blocks = append(blocks, http2HeaderBlock{streamID: streamID, startedNS: timestampNS, fields: fields, identity: identityFrom(observation)})
+				blocks = append(blocks, http2HeaderBlock{streamID: streamID, startedNS: frameStartedNS, fields: fields, identity: frameIdentity})
 				continue
 			}
 			state.continuationStream = streamID
-			state.continuationStarted = timestampNS
+			state.continuationStarted = frameStartedNS
 			// Snapshot the HEADERS identity, including nil; later fragments
 			// must not enrich or mutate the identity at this start boundary.
-			state.continuationIdentity = identityFrom(observation)
+			state.continuationIdentity = frameIdentity
 			state.continuationBlock = append(state.continuationBlock[:0], fragment...)
 
 		case http2FrameContinuation:
@@ -178,6 +195,8 @@ func (state *http2DirectionState) resetHeaderBlock() {
 
 func (state *http2DirectionState) resetFrameState() {
 	state.buffer = nil
+	state.bufferStartedNS = 0
+	state.bufferIdentity = observationIdentity{}
 	state.resetHeaderBlock()
 }
 

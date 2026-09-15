@@ -57,40 +57,79 @@ func TestCorrelatorHTTP2CorrelatesConcurrentStreams(t *testing.T) {
 }
 
 func TestCorrelatorHTTP2ReassemblesFragmentedFrame(t *testing.T) {
-	correlator := NewCorrelator(Config{})
-	client := flow.Endpoint{Address: "10.0.0.10", Port: 32000}
-	server := flow.Endpoint{Address: "10.0.0.20", Port: 8443}
-	requestEncoder := newHPACKTestEncoder(t)
-	responseEncoder := newHPACKTestEncoder(t)
-	request := append([]byte(http2ClientPreface), http2TestHeadersFrame(t, requestEncoder, 1,
-		hpack.HeaderField{Name: ":method", Value: "GET"},
-		hpack.HeaderField{Name: ":path", Value: "/fragmented"},
-	)...)
-
-	fragment := func(timestamp uint64, source, destination flow.Endpoint, payload []byte) []Output {
-		return correlator.Process(Fragment{
-			ObservedAt:          time.Unix(0, int64(timestamp)).UTC(),
-			KernelTimestampNS:   timestamp,
-			NodeName:            "worker-a",
-			Source:              SourceKernelPlaintext,
-			SourceEndpoint:      source,
-			DestinationEndpoint: destination,
-			Payload:             payload,
-		})
+	for _, known := range []bool{false, true} {
+		name := "unknown_to_B"
+		if known {
+			name = "A_to_B"
+		}
+		for _, clock := range []string{"kernel", "wall_fallback"} {
+			t.Run(name+"/"+clock, func(t *testing.T) {
+				correlator := NewCorrelator(Config{})
+				client := flow.Endpoint{Address: "10.0.0.10", Port: 32000}
+				server := flow.Endpoint{Address: "10.0.0.20", Port: 8443}
+				request := append([]byte(http2ClientPreface), http2TestHeadersFrame(t, newHPACKTestEncoder(t), 1,
+					hpack.HeaderField{Name: ":method", Value: "GET"},
+					hpack.HeaderField{Name: ":path", Value: "/fragmented"},
+				)...)
+				first := Fragment{ObservedAt: time.Unix(0, 1_000_000).UTC(), KernelTimestampNS: 1_000_000,
+					NodeName: "worker-a", ObserverPID: 42, Source: SourceKernelPlaintext,
+					SourceEndpoint: client, DestinationEndpoint: server, Payload: request[:len(request)-3]}
+				if known {
+					first.Process = &flow.Process{PID: 42, StartTimeTicks: 100, ContainerID: "A", Cmdline: "secret"}
+					first.SourceResolved = &flow.ResolvedEndpoint{Address: "source-A"}
+					first.DestinationResolved = &flow.ResolvedEndpoint{Address: "destination-A"}
+				}
+				if clock == "wall_fallback" {
+					first.KernelTimestampNS = 0
+				} else {
+					first.ObservedAt = time.Unix(100, 0)
+				}
+				if outputs := correlator.Process(first); len(outputs) != 0 {
+					t.Fatal(outputs)
+				}
+				if known {
+					first.Process.ContainerID = "mutated"
+					first.SourceResolved.Address = "mutated"
+					first.DestinationResolved.Address = "mutated"
+				}
+				last := first
+				last.ObservedAt = time.Unix(0, 2_000_000).UTC()
+				last.KernelTimestampNS = 2_000_000
+				if clock == "wall_fallback" {
+					last.KernelTimestampNS = 0
+				}
+				last.Payload = request[len(request)-3:]
+				last.Process = &flow.Process{PID: 42, StartTimeTicks: 200, ContainerID: "B"}
+				last.SourceResolved = &flow.ResolvedEndpoint{Address: "source-B"}
+				last.DestinationResolved = &flow.ResolvedEndpoint{Address: "destination-B"}
+				if outputs := correlator.Process(last); len(outputs) != 0 {
+					t.Fatal(outputs)
+				}
+				response := last
+				response.ObservedAt = time.Unix(0, 9_000_000).UTC()
+				response.KernelTimestampNS = 9_000_000
+				if clock == "wall_fallback" {
+					response.KernelTimestampNS = 0
+				}
+				response.SourceEndpoint, response.DestinationEndpoint = server, client
+				response.Payload = http2TestHeadersFrame(t, newHPACKTestEncoder(t), 1, hpack.HeaderField{Name: ":status", Value: "204"})
+				outputs := correlator.Process(response)
+				if len(outputs) != 1 || outputs[0].Transaction == nil {
+					t.Fatal(outputs)
+				}
+				tx := outputs[0].Transaction
+				if known {
+					if tx.Process == nil || tx.Process.ContainerID != "A" || tx.Process.StartTimeTicks != 100 || tx.Process.Cmdline != "" || tx.SourceResolved == nil || tx.SourceResolved.Address != "source-A" || tx.DestinationResolved == nil || tx.DestinationResolved.Address != "destination-A" {
+						t.Errorf("first-fragment identity lost: process=%+v source=%+v destination=%+v", tx.Process, tx.SourceResolved, tx.DestinationResolved)
+					}
+				} else if tx.Process != nil || tx.SourceResolved != nil || tx.DestinationResolved != nil {
+					t.Errorf("unknown first fragment enriched from B: %+v", tx)
+				}
+				// Clock starts at the first contributing byte, not completion.
+				assertHTTP2Transaction(t, outputs, 1, "GET", "/fragmented", 204, 8_000)
+			})
+		}
 	}
-
-	split := len(request) - 3
-	if outputs := fragment(1_000_000, client, server, request[:split]); len(outputs) != 0 {
-		t.Fatalf("partial request outputs = %+v", outputs)
-	}
-	if outputs := fragment(2_000_000, client, server, request[split:]); len(outputs) != 0 {
-		t.Fatalf("completed request outputs = %+v", outputs)
-	}
-	response := http2TestHeadersFrame(t, responseEncoder, 1,
-		hpack.HeaderField{Name: ":status", Value: "204"},
-	)
-	outputs := fragment(9_000_000, server, client, response)
-	assertHTTP2Transaction(t, outputs, 1, "GET", "/fragmented", 204, 7_000)
 }
 
 func TestCorrelatorExpiresIdleHTTP2ConnectionAndPendingStream(t *testing.T) {
