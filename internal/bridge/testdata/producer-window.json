@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "network.flow/v1alpha1",
+  "windowStart": "2026-09-11T07:21:20Z",
+  "windowEnd": "2026-09-11T07:21:25Z",
+  "lastObservedAt": "2026-09-11T07:21:24.985232233Z",
+  "flow": {
+    "nodeName": "hermes-loopback-validation",
+    "protocol": "tcp",
+    "direction": "connection",
+    "source": {
+      "address": "127.0.0.1",
+      "port": 44787
+    },
+    "destination": {
+      "address": "127.0.0.1",
+      "port": 45970
+    }
+  },
+  "process": {
+    "pid": 354571,
+    "startTimeTicks": 992859444,
+    "comm": "python3",
+    "via": "procfs"
+  },
+  "bytesTx": 0,
+  "observationCount": 1,
+  "bytesRx": 0,
+  "packetsTx": 0,
+  "packetsRx": 0,
+  "retransmissions": 0,
+  "losses": 0,
+  "rtt": {
+    "count": 1,
+    "sumMicros": 25,
+    "minMicros": 25,
+    "maxMicros": 25
+  },
+  "jitter": {
+    "count": 1,
+    "sumMicros": 12,
+    "minMicros": 12,
+    "maxMicros": 12
+  }
+}

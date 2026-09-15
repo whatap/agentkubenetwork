@@ -1,5 +1,6 @@
 GO ?= $(shell command -v go 2>/dev/null || printf /usr/local/go/bin/go)
 CLANG ?= clang
+BIN_DIR ?= bin
 
 .PHONY: test vet bpf-syntax generate-ebpf build check clean
 
@@ -16,8 +17,9 @@ generate-ebpf:
 	./scripts/generate-ebpf-linux.sh
 
 build:
-	mkdir -p bin
-	$(GO) build -trimpath -o bin/agentkubenetwork ./cmd/agentkubenetwork
+	mkdir -p "$(BIN_DIR)"
+	$(GO) build -trimpath -o "$(BIN_DIR)/agentkubenetwork" ./cmd/agentkubenetwork
+	$(GO) build -trimpath -o "$(BIN_DIR)/network-edge-submit" ./cmd/network-edge-submit
 
 check: bpf-syntax test vet build
 

@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/whatap/agentkubenetwork/internal/dns"
 	"github.com/whatap/agentkubenetwork/internal/flow"
 	"github.com/whatap/agentkubenetwork/internal/l7"
 )
@@ -14,6 +15,7 @@ const (
 	AddressFamilyIPv4 uint16 = 2
 	AddressFamilyIPv6 uint16 = 10
 	ProtocolTCP       uint16 = 6
+	ProtocolUDP       uint16 = 17
 
 	TCPStateEstablished uint32 = 1
 	TCPStateSynSent     uint32 = 2
@@ -23,6 +25,7 @@ const (
 	EventKindTCPSample      uint8 = 2
 	EventKindL7Fragment     uint8 = 3
 	EventKindL7CoverageDrop uint8 = 4
+	EventKindDNS            uint8 = 5
 
 	EventSourceKernelPlaintext uint8 = 1
 	EventSourceOpenSSL         uint8 = 2
@@ -192,6 +195,32 @@ func (event Event) L7Fragment(nodeName string, observedAt time.Time) (l7.Fragmen
 		DestinationEndpoint: flow.Endpoint{Address: destinationAddress, Port: event.DestinationPort},
 		TotalLength:         event.TotalLength,
 		Payload:             append([]byte(nil), event.Payload...),
+	}, nil
+}
+
+// DNSFragment converts a captured UDP DNS datagram into the parser input.
+func (event Event) DNSFragment(nodeName string, observedAt time.Time) (dns.Fragment, error) {
+	if event.Kind != EventKindDNS {
+		return dns.Fragment{}, fmt.Errorf("event kind %d is not a DNS datagram", event.Kind)
+	}
+	if observedAt.IsZero() {
+		return dns.Fragment{}, errors.New("observation wall time is required")
+	}
+	sourceAddress, err := formatAddress(event.Family, event.SourceAddress)
+	if err != nil {
+		return dns.Fragment{}, err
+	}
+	destinationAddress, err := formatAddress(event.Family, event.DestinationAddress)
+	if err != nil {
+		return dns.Fragment{}, err
+	}
+	return dns.Fragment{
+		ObservedAt:        observedAt.UTC(),
+		KernelTimestampNS: event.TimestampNS,
+		NodeName:          nodeName,
+		Source:            flow.Endpoint{Address: sourceAddress, Port: event.SourcePort},
+		Destination:       flow.Endpoint{Address: destinationAddress, Port: event.DestinationPort},
+		Payload:           append([]byte(nil), event.Payload...),
 	}, nil
 }
 

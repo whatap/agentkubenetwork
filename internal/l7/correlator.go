@@ -50,21 +50,27 @@ type Fragment struct {
 	TotalLength         uint32
 	Payload             []byte
 	TCPSequence         uint32
+	Process             *flow.Process
+	SourceResolved      *flow.ResolvedEndpoint
+	DestinationResolved *flow.ResolvedEndpoint
 }
 
 type Transaction struct {
-	SchemaVersion         string       `json:"schemaVersion"`
-	ObservedAt            time.Time    `json:"observedAt"`
-	Flow                  flow.FlowKey `json:"flow"`
-	ObserverPID           uint32       `json:"observerPid,omitempty"`
-	Protocol              string       `json:"protocol"`
-	Source                Source       `json:"source"`
-	Method                string       `json:"method"`
-	Path                  string       `json:"path"`
-	StatusCode            uint16       `json:"statusCode"`
-	StreamID              uint32       `json:"streamId,omitempty"`
-	ResponseLatencyMicros uint64       `json:"responseLatencyMicros"`
-	LatencyBoundary       string       `json:"latencyBoundary"`
+	SchemaVersion         string                 `json:"schemaVersion"`
+	ObservedAt            time.Time              `json:"observedAt"`
+	Flow                  flow.FlowKey           `json:"flow"`
+	ObserverPID           uint32                 `json:"observerPid,omitempty"`
+	Protocol              string                 `json:"protocol"`
+	Source                Source                 `json:"source"`
+	Method                string                 `json:"method"`
+	Path                  string                 `json:"path"`
+	StatusCode            uint16                 `json:"statusCode"`
+	StreamID              uint32                 `json:"streamId,omitempty"`
+	ResponseLatencyMicros uint64                 `json:"responseLatencyMicros"`
+	LatencyBoundary       string                 `json:"latencyBoundary"`
+	Process               *flow.Process          `json:"process,omitempty"`
+	SourceResolved        *flow.ResolvedEndpoint `json:"sourceResolved,omitempty"`
+	DestinationResolved   *flow.ResolvedEndpoint `json:"destinationResolved,omitempty"`
 }
 
 type Drop struct {
@@ -110,6 +116,32 @@ type pendingHTTP1 struct {
 	startedNS uint64
 	method    string
 	path      string
+	identity  observationIdentity
+}
+
+// Identity belongs to the observer at request capture, not to a later Pod/IP
+// lookup at response time. Never retain raw payloads or process command lines.
+type observationIdentity struct {
+	process             *flow.Process
+	source, destination *flow.ResolvedEndpoint
+}
+
+func identityFrom(fragment Fragment) observationIdentity {
+	identity := observationIdentity{}
+	if fragment.Process != nil {
+		process := *fragment.Process
+		process.Cmdline = ""
+		identity.process = &process
+	}
+	if fragment.SourceResolved != nil {
+		source := *fragment.SourceResolved
+		identity.source = &source
+	}
+	if fragment.DestinationResolved != nil {
+		destination := *fragment.DestinationResolved
+		identity.destination = &destination
+	}
+	return identity
 }
 
 type Correlator struct {
@@ -206,6 +238,7 @@ func (correlator *Correlator) Process(fragment Fragment) []Output {
 			startedNS: fragmentTimestampNS(fragment),
 			method:    method,
 			path:      path,
+			identity:  identityFrom(fragment),
 		}
 		return expired
 	}
@@ -258,6 +291,9 @@ func (correlator *Correlator) Process(fragment Fragment) []Output {
 		StatusCode:            statusCode,
 		ResponseLatencyMicros: (completedNS - pending.startedNS) / uint64(time.Microsecond),
 		LatencyBoundary:       BoundaryResponseHeaders,
+		Process:               pending.identity.process,
+		SourceResolved:        pending.identity.source,
+		DestinationResolved:   pending.identity.destination,
 	}
 	return append(expired, Output{Transaction: transaction})
 }
@@ -362,7 +398,7 @@ func (correlator *Correlator) processHTTP2(fragment Fragment) ([]Output, bool) {
 		state.poison()
 		return []Output{{Drop: newDrop(fragment, ProtocolHTTP2, DropHTTP2StreamDesync)}}, true
 	}
-	blocks, err := state.feed(payload, timestampNS)
+	blocks, err := state.feed(payload, timestampNS, fragment)
 	if err != nil {
 		state.poison()
 		return []Output{{Drop: newDrop(fragment, ProtocolHTTP2, DropHTTP2StreamDesync)}}, true
@@ -394,7 +430,7 @@ func (correlator *Correlator) processHTTP2(fragment Fragment) ([]Output, bool) {
 				outputs = append(outputs, Output{Drop: newDrop(fragment, ProtocolHTTP2, DropStateCapacity)})
 				continue
 			}
-			correlator.http2[key] = pendingHTTP2{startedNS: block.startedNS, method: method, path: path}
+			correlator.http2[key] = pendingHTTP2{startedNS: block.startedNS, method: method, path: path, identity: block.identity}
 			continue
 		}
 
@@ -440,6 +476,9 @@ func (correlator *Correlator) processHTTP2(fragment Fragment) ([]Output, bool) {
 			StreamID:              block.streamID,
 			ResponseLatencyMicros: (completedNS - pending.startedNS) / uint64(time.Microsecond),
 			LatencyBoundary:       BoundaryResponseHeaders,
+			Process:               pending.identity.process,
+			SourceResolved:        pending.identity.source,
+			DestinationResolved:   pending.identity.destination,
 		}})
 	}
 	return outputs, true

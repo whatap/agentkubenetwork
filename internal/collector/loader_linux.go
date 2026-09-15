@@ -266,6 +266,12 @@ func (reader *bpfReader) Close() error {
 	)
 }
 
+// InterruptRead wakes the event pump without releasing maps or links it may
+// still be using. The owner closes those only after the pump has joined.
+func (reader *bpfReader) InterruptRead() error {
+	return reader.reader.Close()
+}
+
 func attachKernelPrograms(objects *networkObjects) ([]link.Link, error) {
 	links := make([]link.Link, 0, 12)
 	attachTracepoint := func(group, name string, program *ebpf.Program) error {
@@ -301,6 +307,8 @@ func attachKernelPrograms(objects *networkObjects) ([]link.Link, error) {
 	for name, program := range map[string]*ebpf.Program{
 		"tcp_sendmsg": objects.ObserveTcpSendmsg,
 		"tcp_recvmsg": objects.ObserveTcpRecvmsg,
+		"udp_sendmsg": objects.ObserveUdpSendmsg,
+		"udp_recvmsg": objects.ObserveUdpRecvmsg,
 	} {
 		attached, err := link.AttachTracing(link.TracingOptions{Program: program})
 		if err != nil {

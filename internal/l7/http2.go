@@ -53,24 +53,27 @@ type pendingHTTP2 struct {
 	startedNS uint64
 	method    string
 	path      string
+	identity  observationIdentity
 }
 
 type http2HeaderBlock struct {
 	streamID  uint32
 	startedNS uint64
 	fields    []hpack.HeaderField
+	identity  observationIdentity
 }
 
 type http2DirectionState struct {
-	buffer              []byte
-	lastSeenNS          uint64
-	poisoned            bool
-	continuationStream  uint32
-	continuationStarted uint64
-	continuationBlock   []byte
-	decoder             *hpack.Decoder
-	maxBufferedBytes    int
-	maxHeaderBlockBytes int
+	buffer               []byte
+	lastSeenNS           uint64
+	poisoned             bool
+	continuationStream   uint32
+	continuationStarted  uint64
+	continuationIdentity observationIdentity
+	continuationBlock    []byte
+	decoder              *hpack.Decoder
+	maxBufferedBytes     int
+	maxHeaderBlockBytes  int
 }
 
 func newHTTP2DirectionState(maxBufferedBytes, maxHeaderBlockBytes int) *http2DirectionState {
@@ -81,7 +84,7 @@ func newHTTP2DirectionState(maxBufferedBytes, maxHeaderBlockBytes int) *http2Dir
 	}
 }
 
-func (state *http2DirectionState) feed(payload []byte, timestampNS uint64) ([]http2HeaderBlock, error) {
+func (state *http2DirectionState) feed(payload []byte, timestampNS uint64, observation Fragment) ([]http2HeaderBlock, error) {
 	state.lastSeenNS = timestampNS
 	if len(state.buffer)+len(payload) > state.maxBufferedBytes {
 		state.resetFrameState()
@@ -127,11 +130,14 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64) ([]ht
 				if err != nil {
 					return blocks, fmt.Errorf("%s: %w", DropInvalidHTTP2, err)
 				}
-				blocks = append(blocks, http2HeaderBlock{streamID: streamID, startedNS: timestampNS, fields: fields})
+				blocks = append(blocks, http2HeaderBlock{streamID: streamID, startedNS: timestampNS, fields: fields, identity: identityFrom(observation)})
 				continue
 			}
 			state.continuationStream = streamID
 			state.continuationStarted = timestampNS
+			// Snapshot the HEADERS identity, including nil; later fragments
+			// must not enrich or mutate the identity at this start boundary.
+			state.continuationIdentity = identityFrom(observation)
 			state.continuationBlock = append(state.continuationBlock[:0], fragment...)
 
 		case http2FrameContinuation:
@@ -156,6 +162,7 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64) ([]ht
 				streamID:  streamID,
 				startedNS: state.continuationStarted,
 				fields:    fields,
+				identity:  state.continuationIdentity,
 			})
 			state.resetHeaderBlock()
 		}
@@ -165,6 +172,7 @@ func (state *http2DirectionState) feed(payload []byte, timestampNS uint64) ([]ht
 func (state *http2DirectionState) resetHeaderBlock() {
 	state.continuationStream = 0
 	state.continuationStarted = 0
+	state.continuationIdentity = observationIdentity{}
 	state.continuationBlock = nil
 }
 

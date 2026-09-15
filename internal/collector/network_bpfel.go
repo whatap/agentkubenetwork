@@ -14,13 +14,16 @@ import (
 )
 
 type networkIoCall struct {
-	_         structs.HostLayout
-	Buffer    uint64
-	Requested uint32
-	Fd        int32
-	Direction uint8
-	Reserved  [7]uint8
-	Tuple     struct {
+	_            structs.HostLayout
+	Buffer       uint64
+	PeerAddress  uint64
+	PeerLength   uint64
+	PeerCapacity uint32
+	Requested    uint32
+	Fd           int32
+	Direction    uint8
+	Reserved     [7]uint8
+	Tuple        struct {
 		_             structs.HostLayout
 		Family        uint16
 		Protocol      uint16
@@ -29,6 +32,7 @@ type networkIoCall struct {
 		LocalAddress  [16]uint8
 		RemoteAddress [16]uint8
 	}
+	_ [4]byte
 }
 
 type networkProtocolKey struct {
@@ -129,6 +133,8 @@ const (
 	networkProgObserveTcpConnect              = "observe_tcp_connect"
 	networkProgObserveTcpRecvmsg              = "observe_tcp_recvmsg"
 	networkProgObserveTcpSendmsg              = "observe_tcp_sendmsg"
+	networkProgObserveUdpRecvmsg              = "observe_udp_recvmsg"
+	networkProgObserveUdpSendmsg              = "observe_udp_sendmsg"
 )
 
 // loadNetwork returns the embedded CollectionSpec for network.
@@ -215,6 +221,8 @@ type networkProgramSpecs struct {
 	ObserveTcpConnect              *ebpf.ProgramSpec `ebpf:"observe_tcp_connect"`
 	ObserveTcpRecvmsg              *ebpf.ProgramSpec `ebpf:"observe_tcp_recvmsg"`
 	ObserveTcpSendmsg              *ebpf.ProgramSpec `ebpf:"observe_tcp_sendmsg"`
+	ObserveUdpRecvmsg              *ebpf.ProgramSpec `ebpf:"observe_udp_recvmsg"`
+	ObserveUdpSendmsg              *ebpf.ProgramSpec `ebpf:"observe_udp_sendmsg"`
 }
 
 // networkMapSpecs contains maps before they are loaded into the kernel.
@@ -344,6 +352,8 @@ type networkPrograms struct {
 	ObserveTcpConnect              *ebpf.Program `ebpf:"observe_tcp_connect"`
 	ObserveTcpRecvmsg              *ebpf.Program `ebpf:"observe_tcp_recvmsg"`
 	ObserveTcpSendmsg              *ebpf.Program `ebpf:"observe_tcp_sendmsg"`
+	ObserveUdpRecvmsg              *ebpf.Program `ebpf:"observe_udp_recvmsg"`
+	ObserveUdpSendmsg              *ebpf.Program `ebpf:"observe_udp_sendmsg"`
 }
 
 func (p *networkPrograms) Close() error {
@@ -390,6 +400,8 @@ func (p *networkPrograms) Close() error {
 		p.ObserveTcpConnect,
 		p.ObserveTcpRecvmsg,
 		p.ObserveTcpSendmsg,
+		p.ObserveUdpRecvmsg,
+		p.ObserveUdpSendmsg,
 	)
 }
 

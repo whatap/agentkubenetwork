@@ -12,5 +12,7 @@ type OpenOptions struct {
 
 type EventReader interface {
 	Read() (Event, error)
+	// Close must unblock a concurrent Read. A reader may additionally expose
+	// InterruptRead to stop reading separately from releasing its resources.
 	Close() error
 }

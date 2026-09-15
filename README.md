@@ -4,6 +4,10 @@
 
 ## Status
 
+Code guides: [collector pipeline and operational boundaries](docs/collector-pipeline.md) · [Go↔Java local node bridge](docs/local-node-bridge.md).
+The local bridge is implemented and isolated-tested; its listener defaults to disabled. Backend storage/query and deployment acceptance are separate gates.
+`make build` produces both `bin/agentkubenetwork` and `bin/network-edge-submit` (`BIN_DIR` overrides the output directory). The sender forwards completed, measured L4 windows through the node agent's dedicated loopback listener; it does not upload L7/DNS or Kubernetes state. See the [TagCount run recipe](docs/local-node-bridge.md#연속-l4-전송--승인된-테스트-노드에서만) before enabling a test listener.
+
 Pre-alpha passive-observation vertical slice. The current boundaries are:
 
 ```text
@@ -19,12 +23,16 @@ read/write/recvfrom/sendto tracepoints + supported OpenSSL uprobes
   -> bounded plaintext protocol prefixes
   -> conservative HTTP/1 and HTTP/2 request/response correlation
 
-normalized flow observations (JSONL)
-  -> deterministic 5-second EdgeWindow aggregation
+live TCP observations (optional windows/both output mode)
+  -> bounded, timer-driven per-flow window aggregation
   -> versioned window records (JSONL)
 
 L7 transactions and coverage drops
   -> network.l7/v1alpha1 JSONL
+
+UDP DNS datagrams
+  -> bounded query correlation + independent expiry/EOF finalization
+  -> network.dns/v1alpha1 JSONL
 ```
 
 The eBPF source, Linux object generation, loader, attach, and ring-buffer decode path have been verified on both the `okd-k8s` manager host and a standalone Pod on one OKD worker. CO-RE relocations keep tracepoint field reads compatible when the worker kernel adds fields to the common trace entry. This validates the current connect tracer bullet, not production DaemonSet packaging or least-privilege SCC policy. Timing statistics keep `count/sum/min/max` rather than repeatedly averaging averages, preventing the order-dependent merge defect found in the legacy implementation.
@@ -50,6 +58,19 @@ sudo ./agentkubenetwork \
 
 OpenSSL libraries are opt-in and platform-specific. Both paths are needed on OpenSSL 3 systems that split SSL APIs into `libssl` and BIO APIs into `libcrypto`.
 
+`stdin` aggregation is a finite batch and waits for EOF. For continuous live L4 windows, explicitly select the output mode:
+
+```bash
+sudo ./bin/agentkubenetwork \
+  -source=ebpf -node-name="$NODE_NAME" \
+  -output-mode=windows -window=5s -allowed-lateness=1s \
+  -output-queue=4096 -output-drain-timeout=5s -duration=30s
+```
+
+The default `raw` mode preserves diagnostic behavior; `both` emits raw observations AND windows, which must not be double-counted. HTTP/DNS/drop records remain separately typed in every mode. Live windows preserve NAT and observer identity, do not merge unknown/conflicting identity, and mark unfinished shutdown windows `partial:true`. They are not yet Pod/Service-level edge aggregates. `network-edge-submit` converts only complete, measured L4 windows through the Java bridge into TagCountPack; a local acceptance ACK does not prove WhaTap backend storage.
+
+See [수집 파이프라인과 운영 적용 경계](docs/collector-pipeline.md) for the reading order, flags, measurement meanings, loss semantics, and remaining ingest gates. Window/HTTP/DNS records omit command lines; raw TCP diagnostic records may contain them.
+
 ## eBPF source
 
 ```text
@@ -72,7 +93,7 @@ CI regenerates the checked-in eBPF artifacts and fails if either artifact change
 
 - TCP SRTT uses Linux `tcp_sock.srtt_us >> 3`; RTT variance uses `mdev_us >> 2`. Send and receive samples are normalized into one canonical connection key.
 - SRTT and L7 duration are independent evidence. The collector does **not** calculate `request_duration - SRTT` as application time.
-- HTTP latency is `request_to_response_headers`, not full body duration. Query strings are removed and plaintext payload bytes are never written to JSONL.
+- HTTP latency is labeled `request_to_response_headers`, not full body duration. In the HTTP/1 capture path this is first-line/status-line oriented, not proof of full header-block completion. Query strings are removed and plaintext payload bytes are never written to JSONL.
 - HTTP/1 correlates one non-overlapping request per normalized connection. Informational `1xx` responses do not consume the request. Detected pipelining/overlap and `101` upgrades emit coverage drops instead of guessed transactions.
 - HTTP/2 correlates `(normalized connection, stream ID)`, maintains direction-specific HPACK state, and supports HEADERS/CONTINUATION. A known kernel truncation or frame/HPACK decode failure poisons that direction and emits `http2_stream_desync`; later frames are not guessed.
 - OpenSSL support observes plaintext buffers passed to supported SSL APIs. It does not decrypt TLS records. Context-to-fd mapping covers `SSL_set_fd`, `BIO_new_socket`, `BIO_int_ctrl(BIO_C_SET_FD)`, and `SSL_set_bio` lifecycles.
@@ -106,6 +127,12 @@ The controlled run completed with 300 successful trigger requests, 200 decoded e
 
 ## Intended deployment
 
+### Reproducible isolated Linux smoke
+
+`scripts/runtime_smoke.py` runs controlled real HTTP/UDP-DNS sockets, compares observations, records the binary hash, and checks BPF/process cleanup. It requires a NEW network namespace and private output directory; it refuses to run in the host's default network namespace. Follow the [Linux smoke instructions](docs/collector-pipeline.md#재현-가능한-linux-smoke) or the command under that document's Linux section. This is a small runtime regression test, not a sustained-load or all-kernel qualification. The older OKD tracer bullet above does not revalidate the entire changed pipeline.
+
+### Packaging target
+
 Development starts as a one-node canary DaemonSet for kernel, BTF, capability, and resource validation. Once stable, the intended default packaging is a managed third container in the existing `whatap-node-agent` DaemonSet:
 
 ```text
@@ -129,7 +156,7 @@ Do not copy the npmAgent repository wholesale. Port one kernel hook and one fiel
 - release policy for generated eBPF objects and immutable Linux artifacts
 - immutable image-based OKD deployment and DaemonSet rollout verification
 - inbound/close/reset TCP lifecycle observations
-- bytes, packets, retransmission, loss, and UDP observations
+- bytes, packets, retransmission, loss, and general UDP flow metrics (bounded UDP DNS observation is implemented)
 - vectored I/O, io_uring, sendfile, kTLS, non-OpenSSL TLS libraries, and complete TCP stream reconstruction
 - Kubernetes Pod/Service/Workload identity
 - WhaTap backend transport
