@@ -45,7 +45,7 @@ func TestCLIDurationFlushesAndInterruptsIdleReader(t *testing.T) {
 	reader := &idleCLIReader{stop: make(chan struct{})}
 	var output bytes.Buffer
 	open := func(collector.OpenOptions) (collector.EventReader, error) { return reader, nil }
-	if err := runArgs([]string{"-source=ebpf", "-output-mode=windows", "-duration=100ms", "-conntrack=false", "-process=false"}, bytes.NewReader(nil), &output, open); err != nil {
+	if err := runArgs([]string{"-source=ebpf", "-pod-identity=false", "-output-mode=windows", "-duration=100ms", "-conntrack=false", "-process=false"}, bytes.NewReader(nil), &output, open); err != nil {
 		t.Fatal(err)
 	}
 	var window flow.Window
@@ -70,7 +70,7 @@ func TestCLIRejectsInvalidConfigurationBeforeAttaching(t *testing.T) {
 				opened = true
 				return nil, io.ErrUnexpectedEOF
 			}
-			err := runArgs([]string{"-source=ebpf", arg}, bytes.NewReader(nil), io.Discard, open)
+			err := runArgs([]string{"-source=ebpf", "-pod-identity=false", arg}, bytes.NewReader(nil), io.Discard, open)
 			if err == nil || opened {
 				t.Fatalf("invalid config reached kernel attach: err=%v opened=%v", err, opened)
 			}
@@ -82,7 +82,7 @@ func TestCLIWiresWindowSizeIntoRealEventPath(t *testing.T) {
 	reader := &cliEventReader{}
 	var output bytes.Buffer
 	open := func(options collector.OpenOptions) (collector.EventReader, error) { return reader, nil }
-	err := runArgs([]string{"-source=ebpf", "-node-name=node", "-output-mode=windows", "-window=100ms", "-conntrack=false", "-process=false"}, bytes.NewReader(nil), &output, open)
+	err := runArgs([]string{"-source=ebpf", "-pod-identity=false", "-node-name=node", "-output-mode=windows", "-window=100ms", "-conntrack=false", "-process=false"}, bytes.NewReader(nil), &output, open)
 	if err != nil {
 		t.Fatal(err)
 	}

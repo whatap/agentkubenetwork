@@ -2,7 +2,7 @@
 
 ## 먼저 구분할 것
 
-이 저장소는 실제 커널 이벤트를 수집한다. 하지만 **수집기 JSONL 출력**, **WhaTap 저장·조회**, **고객 운영 준비**는 서로 다른 완료 조건이다. 이 문서는 수집기의 현재 계약과 아직 연결되지 않은 경계를 설명한다.
+이 저장소는 실제 커널 이벤트를 수집한다. 하지만 **수집기 JSONL 출력**, **TCP 전송**, **WhaTap 저장·조회**, **고객 운영 준비**는 서로 다른 완료 조건이다. 이 문서는 수집기의 현재 계약과 아직 검증되지 않은 경계를 설명한다.
 
 ```text
 Linux 커널 / 지원 OpenSSL 함수
@@ -10,11 +10,12 @@ Linux 커널 / 지원 OpenSSL 함수
        └─ internal/app/events.go
             ├─ TCP → Observation → 대상정보 보강 / 제한된 재시도
             │                     └─ 선택: Stream → per-flow Window
+            │                            └─ 선택: Go TagCount 큐 → WhaTap TCP 직접 전송
             ├─ HTTP → 보강정보 snapshot → L7 correlator
             ├─ DNS  → 보강정보 snapshot → DNS correlator
             └─ coverage/drop
                  └─ bounded output queue → JSONL
-                      └─ 완료된 L4 창 → network-edge-submit → 전용 Java 수신부
+                      └─ 대안: 완료된 L4 창 → network-edge-submit → 전용 Java 수신부
                            └─ TagCountPack → 노드 큐 수락까지 로컬 검증
                                 └─ [아직 미검증] WhaTap 저장 → 조회 → UI
 ```
@@ -48,6 +49,8 @@ sudo ./bin/agentkubenetwork \
 - `-max-events`: 출력 레코드 수가 아니라 reader의 입력 이벤트 수 제한이다.
 - 출력 옵션·시간 제한은 `ebpf` 경로용이다. `stdin`은 기존 배치 동작을 유지한다.
 - OpenSSL은 `-openssl-library`를 지정한 경우만 부착한다. 라이브러리 경로와 지원 API는 시스템별 검증이 필요하다.
+
+`-export=tagcount`를 추가하면 Java 없이 수집기 내부에서 완료·측정된 L4 창을 직접 전송한다. 기본은 `-export=none`이다. 별도의 제한 큐와 키/서버/객체 설정, 실패 및 종료 계약은 [독립 TagCount 전송](direct-tagcount.md)을 따른다. 기본 `-stdout=auto`는 TagCount 전송 시 JSONL을 끄고, `-stdout=jsonl`로 복원한다. 같은 창을 Java 브리지로도 보내면 중복될 수 있다. stderr의 주기 요약은 `-log-level=info -log-interval=1m`이며 종료 요약/fatal 오류는 끄지 않는다. [로그 설정](logging.md)을 참고한다.
 
 ## 창과 식별정보
 
@@ -114,11 +117,16 @@ sudo unshare --net -- sh -c '
 
 ## 서버 연동의 다음 경계
 
-완료된 L4 창은 `uploadNetworkEdge` 전용 명령으로 Java 수신부의 `kube_network_edge_v1alpha1` TagCountPack으로 변환한다. 공식 Go codec과 Java 수신부 사이의 실제 TCP 왕복·직렬화·큐 수락 테스트는 [로컬 브리지 검증](local-node-bridge.md)에 포함돼 있다. 일반 `uploadTagCount`를 무제한 호출하거나 namespace 프로젝트 전체에 방송하지 않는다. Local ACK, backend 저장, API 조회는 각각 다른 증거다.
+완료된 L4 창은 `kube_network_edge_v1alpha1` TagCountPack으로 전송한다. 기본적으로 전송은 꺼져 있으며, 활성화 경로는 두 가지다.
+
+- [독립 Go 전송](direct-tagcount.md): 수집기 내부에서 팩 생성·제한 큐·키 협상·TCP 전송. 프로젝트와 객체는 Go의 명시적 설정에서 결정한다.
+- [선택적 Java 브리지](local-node-bridge.md): JSONL을 `network-edge-submit`이 `uploadNetworkEdge` 전용 명령으로 넘긴다. 프로젝트와 객체는 Java 설정에서 결정한다.
+
+일반 `uploadTagCount`를 무제한 호출하거나 namespace 프로젝트 전체에 방송하지 않는다. 직접 전송의 TCP 쓰기 완료, Java의 Local ACK, backend 저장, API 조회는 각각 다른 증거다.
 
 현재 남은 운영 gate:
 
-- 테스트 노드의 수신부 활성화와 co-resident 프로세스 trust 경계 검토
+- 테스트 노드의 직접 전송 설정 또는 Java 수신부 활성화와 각각의 자격 증명/네트워크 trust 경계 검토
 - 테스트 프로젝트에 저장한 원본 창을 backend에서 다시 조회해 필드 비교
 - L7/DNS/coverage의 별도 전송 계약과 p95 재구성에 필요한 분포 보존
 - Pod/Service UID와 시간 유효성을 고려한 대상 연결

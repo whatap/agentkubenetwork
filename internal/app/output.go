@@ -51,12 +51,22 @@ func newQueuedOutput(output io.Writer, nodeName string, now func() time.Time, ca
 	if capacity < 0 || drainTimeout < 0 {
 		return nil, errors.New("output queue capacity and drain timeout must be positive")
 	}
-	q := &queuedOutput{output: output, queue: make(chan []byte, capacity), done: make(chan struct{}), failed: make(chan struct{}), now: now, nodeName: nodeName, drainTimeout: drainTimeout}
+	q := &queuedOutput{output: output, done: make(chan struct{}), failed: make(chan struct{}), now: now, nodeName: nodeName, drainTimeout: drainTimeout}
+	// Suppression is below event routing and aggregation, not a replacement
+	// for them. Avoid serializing, queueing, or dropping discarded JSONL.
+	if output == io.Discard {
+		close(q.done)
+		return q, nil
+	}
+	q.queue = make(chan []byte, capacity)
 	go q.run()
 	return q, nil
 }
 
 func (q *queuedOutput) Encode(value any) error {
+	if q.output == io.Discard {
+		return nil
+	}
 	select {
 	case <-q.failed:
 		return q.Err()
@@ -131,6 +141,9 @@ func (q *queuedOutput) run() {
 }
 
 func (q *queuedOutput) Close() error {
+	if q.output == io.Discard {
+		return nil
+	}
 	close(q.queue)
 	timer := time.NewTimer(q.drainTimeout)
 	defer timer.Stop()

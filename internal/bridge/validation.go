@@ -33,7 +33,15 @@ func validateWindow(w flow.Window) error {
 	if w.WindowStart.Unix() < 0 || w.WindowEnd.Unix() < 0 || w.WindowStart.Unix() > maxSafe/1000 || w.WindowEnd.Unix() > maxSafe/1000 || start <= 0 || end <= start || end > maxSafe || end-start > 60000 {
 		return bad
 	}
-	if !printable(w.Flow.NodeName, 253) || w.Flow.Protocol != "tcp" || !endpoint(w.Flow.Source.Address, w.Flow.Source.Port) || !endpoint(w.Flow.Destination.Address, w.Flow.Destination.Port) {
+	if !printable(w.Flow.NodeName, 253) || w.Flow.Protocol != "tcp" {
+		return bad
+	}
+	// Socket-state observations can have a missing port. Preserve the raw
+	// observation, but never infer a missing port or serialize it as an edge.
+	if w.Flow.Source.Port == 0 || w.Flow.Destination.Port == 0 {
+		return ErrIncompleteTuple
+	}
+	if !endpoint(w.Flow.Source.Address, w.Flow.Source.Port) || !endpoint(w.Flow.Destination.Address, w.Flow.Destination.Port) {
 		return bad
 	}
 	if w.Process != nil && w.Process.ContainerID != "" && !printable(w.Process.ContainerID, 128) {

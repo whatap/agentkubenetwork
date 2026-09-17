@@ -26,6 +26,12 @@ The retired repository is evidence and a hook catalog, not a template to copy wh
 - packet capture, AWS discovery, traceroute, and backend sender dependencies in the first kernel slice
 - the retired `npm_process_tag_data` schema as the new canonical contract
 
+## Selected direct transport port
+
+The standalone TagCount path ports the required license format, AES-128 key-reset and TCP framing behavior from `gointernal/lang/license`, `gointernal/util/crypto`, and `gointernal/net/secure` into `internal/whatap`. The owner approved this limited internal reuse; no whole legacy package, global sender singleton, credential logging, remote command execution, or endless reconnect loop is imported. The existing `golib` provides `TagCountPack` and its codec; no local `npmagent` checkout is needed to build.
+
+The new `kube_network_edge_v1alpha1` field contract and original window timestamps remain unchanged. See [direct transport configuration and limitations](direct-tagcount.md). This selected user-space transport port does not change the kernel-port acceptance criteria or assign a repository distribution license.
+
 ## First probe acceptance
 
 The first kernel port is accepted only when a disposable Linux fixture proves:

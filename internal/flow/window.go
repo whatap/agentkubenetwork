@@ -45,6 +45,9 @@ type FlowKey struct {
 }
 
 type Observation struct {
+	SourcePod           *Pod              `json:"sourcePod,omitempty"`
+	DestinationPod      *Pod              `json:"destinationPod,omitempty"`
+	ObserverPod         *Pod              `json:"observerPod,omitempty"`
 	ObservedAt          time.Time         `json:"observedAt"`
 	KernelTimestampNS   uint64            `json:"kernelTimestampNs,omitempty"`
 	Flow                FlowKey           `json:"flow"`
@@ -62,6 +65,9 @@ type Observation struct {
 }
 
 type Window struct {
+	SourcePod           *Pod              `json:"sourcePod,omitempty"`
+	DestinationPod      *Pod              `json:"destinationPod,omitempty"`
+	ObserverPod         *Pod              `json:"observerPod,omitempty"`
 	SchemaVersion       string            `json:"schemaVersion"`
 	Partial             bool              `json:"partial,omitempty"`
 	WindowStart         time.Time         `json:"windowStart"`
@@ -87,6 +93,9 @@ type Window struct {
 }
 
 type aggregateKey struct {
+	SourcePod              Pod
+	DestinationPod         Pod
+	ObserverPod            Pod
 	Start                  time.Time
 	Flow                   FlowKey
 	HasSourceResolved      bool
@@ -99,6 +108,15 @@ type aggregateKey struct {
 
 func keyFor(observation Observation, windowSize time.Duration) aggregateKey {
 	key := aggregateKey{Start: observation.ObservedAt.UTC().Truncate(windowSize), Flow: observation.Flow}
+	if observation.SourcePod != nil {
+		key.SourcePod = *observation.SourcePod
+	}
+	if observation.DestinationPod != nil {
+		key.DestinationPod = *observation.DestinationPod
+	}
+	if observation.ObserverPod != nil {
+		key.ObserverPod = *observation.ObserverPod
+	}
 	if observation.SourceResolved != nil {
 		key.HasSourceResolved = true
 		key.SourceResolved = *observation.SourceResolved
@@ -123,6 +141,15 @@ func (key aggregateKey) newWindow(windowSize time.Duration) *Window {
 		Flow:          key.Flow,
 	}
 	// key is a value copy: neither inputs nor other windows share these pointers.
+	if key.SourcePod.UID != "" {
+		window.SourcePod = &key.SourcePod
+	}
+	if key.DestinationPod.UID != "" {
+		window.DestinationPod = &key.DestinationPod
+	}
+	if key.ObserverPod.UID != "" {
+		window.ObserverPod = &key.ObserverPod
+	}
 	if key.HasSourceResolved {
 		window.SourceResolved = &key.SourceResolved
 	}
@@ -192,6 +219,9 @@ func sortWindows(windows []Window) {
 			compareResolved(left.SourceResolved, right.SourceResolved),
 			compareResolved(left.DestinationResolved, right.DestinationResolved),
 			compareProcess(left.Process, right.Process),
+			comparePod(left.SourcePod, right.SourcePod),
+			comparePod(left.DestinationPod, right.DestinationPod),
+			comparePod(left.ObserverPod, right.ObserverPod),
 		) < 0
 	})
 }

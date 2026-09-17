@@ -39,6 +39,9 @@ type Fragment struct {
 	Process             *flow.Process
 	SourceResolved      *flow.ResolvedEndpoint
 	DestinationResolved *flow.ResolvedEndpoint
+	SourcePod           *flow.Pod
+	DestinationPod      *flow.Pod
+	ObserverPod         *flow.Pod
 	Source              flow.Endpoint
 	Destination         flow.Endpoint
 	Payload             []byte
@@ -63,6 +66,9 @@ type Transaction struct {
 	Process        *flow.Process          `json:"process,omitempty"`
 	ClientResolved *flow.ResolvedEndpoint `json:"clientResolved,omitempty"`
 	ServerResolved *flow.ResolvedEndpoint `json:"serverResolved,omitempty"`
+	ClientPod      *flow.Pod              `json:"clientPod,omitempty"`
+	ServerPod      *flow.Pod              `json:"serverPod,omitempty"`
+	ObserverPod    *flow.Pod              `json:"observerPod,omitempty"`
 	Protocol       string                 `json:"protocol"`
 	Client         flow.Endpoint          `json:"client"`
 	Server         flow.Endpoint          `json:"server"`
@@ -71,7 +77,10 @@ type Transaction struct {
 	Outcome        string                 `json:"outcome"`
 	Reason         string                 `json:"reason,omitempty"`
 	ResponseCode   string                 `json:"responseCode,omitempty"`
-	LatencyMicros  uint64                 `json:"latencyMicros,omitempty"`
+	// LatencyMeasured requires a matched query and nonzero, ordered timestamps.
+	// A measured sub-microsecond duration has LatencyMicros == 0.
+	LatencyMeasured bool   `json:"latencyMeasured,omitempty"`
+	LatencyMicros   uint64 `json:"latencyMicros,omitempty"`
 }
 
 // Parse decodes the DNS header and the first question section. Compressed
@@ -103,6 +112,20 @@ func Parse(payload []byte) (Message, error) {
 	return message, nil
 }
 
+// ValidQuestionName is the captured/exported name policy, not hostname syntax.
+// Empty means unknown/root; supported nonempty names are bounded visible ASCII.
+func ValidQuestionName(name string) bool {
+	if len(name) > 253 {
+		return false
+	}
+	for i := range name {
+		if name[i] < 33 || name[i] > 126 {
+			return false
+		}
+	}
+	return true
+}
+
 func parseName(payload []byte, offset int) (string, int, error) {
 	var name []byte
 	for {
@@ -119,6 +142,13 @@ func parseName(payload []byte, offset int) (string, int, error) {
 		offset++
 		if offset+length > len(payload) {
 			return "", 0, errors.New("label runs past datagram end")
+		}
+		nameLength := len(name) + length
+		if len(name) > 0 {
+			nameLength++
+		}
+		if nameLength > 253 || !ValidQuestionName(string(payload[offset:offset+length])) {
+			return "", 0, errors.New("unsupported question name")
 		}
 		if len(name) > 0 {
 			name = append(name, '.')
@@ -229,8 +259,20 @@ func (correlator *Correlator) Process(fragment Fragment) []Transaction {
 	transactions := correlator.expire(fragment.ObservedAt)
 
 	message, err := Parse(fragment.Payload)
+	payload := fragment.Payload
 	fragment = snapshotFragment(fragment)
 	if err != nil {
+		// Without a complete header, retain only the raw diagnostic tuple;
+		// client/server attribution would invent a direction. Observer is independent.
+		if len(payload) < 12 {
+			fragment.SourceResolved, fragment.DestinationResolved = nil, nil
+			fragment.SourcePod, fragment.DestinationPod = nil, nil
+		} else if payload[2]&0x80 != 0 {
+			// The header establishes response direction even with a malformed question.
+			fragment.Source, fragment.Destination = fragment.Destination, fragment.Source
+			fragment.SourceResolved, fragment.DestinationResolved = fragment.DestinationResolved, fragment.SourceResolved
+			fragment.SourcePod, fragment.DestinationPod = fragment.DestinationPod, fragment.SourcePod
+		}
 		return append(transactions, Transaction{
 			SchemaVersion:  SchemaVersion,
 			ObservedAt:     fragment.ObservedAt,
@@ -239,6 +281,9 @@ func (correlator *Correlator) Process(fragment Fragment) []Transaction {
 			Process:        fragment.Process,
 			ClientResolved: fragment.SourceResolved,
 			ServerResolved: fragment.DestinationResolved,
+			ClientPod:      fragment.SourcePod,
+			ServerPod:      fragment.DestinationPod,
+			ObserverPod:    fragment.ObserverPod,
 			Protocol:       "udp",
 			Client:         fragment.Source,
 			Server:         fragment.Destination,
@@ -277,6 +322,9 @@ func (correlator *Correlator) Process(fragment Fragment) []Transaction {
 		Process:        fragment.Process,
 		ClientResolved: fragment.DestinationResolved,
 		ServerResolved: fragment.SourceResolved,
+		ClientPod:      fragment.DestinationPod,
+		ServerPod:      fragment.SourcePod,
+		ObserverPod:    fragment.ObserverPod,
 		Client:         fragment.Destination,
 		Server:         fragment.Source,
 		QueryName:      message.QuestionName,
@@ -290,7 +338,11 @@ func (correlator *Correlator) Process(fragment Fragment) []Transaction {
 		transaction.Process = query.fragment.Process
 		transaction.ClientResolved = query.fragment.SourceResolved
 		transaction.ServerResolved = query.fragment.DestinationResolved
-		if fragment.KernelTimestampNS > query.fragment.KernelTimestampNS {
+		transaction.ClientPod = query.fragment.SourcePod
+		transaction.ServerPod = query.fragment.DestinationPod
+		transaction.ObserverPod = query.fragment.ObserverPod
+		if query.fragment.KernelTimestampNS != 0 && fragment.KernelTimestampNS >= query.fragment.KernelTimestampNS {
+			transaction.LatencyMeasured = true
 			transaction.LatencyMicros = (fragment.KernelTimestampNS - query.fragment.KernelTimestampNS) / 1000
 		}
 	}
@@ -347,6 +399,9 @@ func (correlator *Correlator) expire(now time.Time) []Transaction {
 // and resolved endpoints currently contain only scalar/string fields.
 func snapshotFragment(fragment Fragment) Fragment {
 	fragment.Payload = nil
+	fragment.SourcePod = snapshotPod(fragment.SourcePod)
+	fragment.DestinationPod = snapshotPod(fragment.DestinationPod)
+	fragment.ObserverPod = snapshotPod(fragment.ObserverPod)
 	fragment.NodeName = strings.Clone(fragment.NodeName)
 	fragment.Source.Address = strings.Clone(fragment.Source.Address)
 	fragment.Destination.Address = strings.Clone(fragment.Destination.Address)
@@ -366,6 +421,14 @@ func snapshotFragment(fragment Fragment) Fragment {
 	return fragment
 }
 
+func snapshotPod(pod *flow.Pod) *flow.Pod {
+	if pod == nil {
+		return nil
+	}
+	copy := *pod
+	return &copy
+}
+
 func (correlator *Correlator) noResponse(query *pendingQuery) Transaction {
 	return Transaction{
 		SchemaVersion:  SchemaVersion,
@@ -375,6 +438,9 @@ func (correlator *Correlator) noResponse(query *pendingQuery) Transaction {
 		Process:        query.fragment.Process,
 		ClientResolved: query.fragment.SourceResolved,
 		ServerResolved: query.fragment.DestinationResolved,
+		ClientPod:      query.fragment.SourcePod,
+		ServerPod:      query.fragment.DestinationPod,
+		ObserverPod:    query.fragment.ObserverPod,
 		Protocol:       "udp",
 		Client:         query.fragment.Source,
 		Server:         query.fragment.Destination,

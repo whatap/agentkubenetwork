@@ -1,6 +1,9 @@
 package app
 
 import (
+	"errors"
+	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -96,6 +99,16 @@ func pumpEvents(reader collector.EventReader, maxEvents int, now func() time.Tim
 			default:
 			}
 			event, err := reader.Read()
+			if errors.Is(err, os.ErrClosed) {
+				// InterruptRead closes the ring reader to unblock epoll. Only
+				// classify that error as EOF once our own stop was requested.
+				// Earlier read failures and unrelated errors remain failures.
+				select {
+				case <-stop:
+					err = io.EOF
+				default:
+				}
+			}
 			observedAt := progress.accept(err != nil || (maxEvents > 0 && count+1 == maxEvents))
 			if err == nil {
 				// A reader may reuse its raw ring-buffer record on the next Read.

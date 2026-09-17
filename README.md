@@ -4,9 +4,9 @@
 
 ## Status
 
-Code guides: [collector pipeline and operational boundaries](docs/collector-pipeline.md) · [Go↔Java local node bridge](docs/local-node-bridge.md).
-The local bridge is implemented and isolated-tested; its listener defaults to disabled. Backend storage/query and deployment acceptance are separate gates.
-`make build` produces both `bin/agentkubenetwork` and `bin/network-edge-submit` (`BIN_DIR` overrides the output directory). The sender forwards completed, measured L4 windows through the node agent's dedicated loopback listener; it does not upload L7/DNS or Kubernetes state. See the [TagCount run recipe](docs/local-node-bridge.md#연속-l4-전송--승인된-테스트-노드에서만) before enabling a test listener.
+Code guides: [collector pipeline and operational boundaries](docs/collector-pipeline.md) · [standalone Go TagCount export](docs/direct-tagcount.md) · [optional Go↔Java local node bridge](docs/local-node-bridge.md).
+`agentkubenetwork -export=tagcount` sends measured L4 windows and typed HTTP/DNS/coverage records directly through a Go-owned WhaTap TCP session; no Java agent or separate sender process is required. Binary export is disabled by default. Backend storage/query and deployment acceptance remain separate gates.
+`make build` produces both `bin/agentkubenetwork` and the existing optional `bin/network-edge-submit` (`BIN_DIR` overrides the output directory). The latter retains the L4-only Java loopback bridge path. Kubernetes state remains owned by the Kubernetes agent; do not send the same windows through both paths.
 
 Pre-alpha passive-observation vertical slice. The current boundaries are:
 
@@ -26,6 +26,7 @@ read/write/recvfrom/sendto tracepoints + supported OpenSSL uprobes
 live TCP observations (optional windows/both output mode)
   -> bounded, timer-driven per-flow window aggregation
   -> versioned window records (JSONL)
+  -> optional in-process TagCount queue -> WhaTap TCP (no Java)
 
 L7 transactions and coverage drops
   -> network.l7/v1alpha1 JSONL
@@ -67,9 +68,29 @@ sudo ./bin/agentkubenetwork \
   -output-queue=4096 -output-drain-timeout=5s -duration=30s
 ```
 
-The default `raw` mode preserves diagnostic behavior; `both` emits raw observations AND windows, which must not be double-counted. HTTP/DNS/drop records remain separately typed in every mode. Live windows preserve NAT and observer identity, do not merge unknown/conflicting identity, and mark unfinished shutdown windows `partial:true`. They are not yet Pod/Service-level edge aggregates. `network-edge-submit` converts only complete, measured L4 windows through the Java bridge into TagCountPack; a local acceptance ACK does not prove WhaTap backend storage.
+The default `raw` mode preserves diagnostic behavior; `both` emits raw observations AND windows, which must not be double-counted. HTTP/DNS/drop records remain separately typed in every mode. Live windows preserve NAT and observer identity, do not merge unknown/conflicting identity, and mark unfinished shutdown windows `partial:true`. They are not yet Pod/Service-level edge aggregates.
+
+To send TagCount directly from this binary, add `-export=tagcount -whatap-config=/etc/whatap-network/whatap.conf` to the live windows command after preparing an approved test project's credentials. Default `-stdout=auto` suppresses duplicate JSONL with TagCount; `-stdout=jsonl` restores it. `-log-level=info -log-interval=1m` emits compact periodic summaries on stderr; final summaries and fatal errors remain visible at every level. See [logging controls](docs/logging.md) and [standalone configuration and delivery semantics](docs/direct-tagcount.md): `written` means TCP write completion, not backend persistence. The original `network-edge-submit` Java bridge remains an alternative, not a prerequisite.
 
 See [수집 파이프라인과 운영 적용 경계](docs/collector-pipeline.md) for the reading order, flags, measurement meanings, loss semantics, and remaining ingest gates. Window/HTTP/DNS records omit command lines; raw TCP diagnostic records may contain them.
+
+### Default-on Pod UID enrichment
+
+Live `-source=ebpf` commands enable a single read-only, cluster-wide Pod informer
+by default for L4, HTTP and DNS. Use `-pod-identity=false` to opt out explicitly.
+The stdin batch path remains Kubernetes-free. The informer uses in-cluster configuration; an explicit
+`-kubeconfig=/path/to/config` selects an external configuration without implicit
+home-directory discovery. `-pod-sync-timeout=10s` bounds startup synchronization
+and informer shutdown. Startup fails rather than capturing with an unsynced cache.
+See [identity semantics and least-privilege RBAC](docs/pod-identity.md).
+
+### Container image
+
+`make image-binaries` cross-builds static Linux amd64/arm64 binaries. The pinned
+distroless `Dockerfile` packages only the target binary; its default command selects
+live windows and direct TagCount export. Supply runtime credentials and existing
+Pod list/watch permissions; no secrets or kubeconfig are built into the image.
+See [image build and runtime prerequisites](docs/container-image.md).
 
 ## eBPF source
 
@@ -93,7 +114,7 @@ CI regenerates the checked-in eBPF artifacts and fails if either artifact change
 
 - TCP SRTT uses Linux `tcp_sock.srtt_us >> 3`; RTT variance uses `mdev_us >> 2`. Send and receive samples are normalized into one canonical connection key.
 - SRTT and L7 duration are independent evidence. The collector does **not** calculate `request_duration - SRTT` as application time.
-- HTTP latency is labeled `request_to_response_headers`, not full body duration. In the HTTP/1 capture path this is first-line/status-line oriented, not proof of full header-block completion. Query strings are removed and plaintext payload bytes are never written to JSONL.
+- HTTP/1 latency is labeled `request_to_response_status`; HTTP/2 uses `request_to_response_headers`. Neither is full body duration. Query strings are removed and plaintext payload bytes are never written to JSONL; the TagCount HTTP pack also omits URL/path.
 - HTTP/1 correlates one non-overlapping request per normalized connection. Informational `1xx` responses do not consume the request. Detected pipelining/overlap and `101` upgrades emit coverage drops instead of guessed transactions.
 - HTTP/2 correlates `(normalized connection, stream ID)`, maintains direction-specific HPACK state, and supports HEADERS/CONTINUATION. A known kernel truncation or frame/HPACK decode failure poisons that direction and emits `http2_stream_desync`; later frames are not guessed.
 - OpenSSL support observes plaintext buffers passed to supported SSL APIs. It does not decrypt TLS records. Context-to-fd mapping covers `SSL_set_fd`, `BIO_new_socket`, `BIO_int_ctrl(BIO_C_SET_FD)`, and `SSL_set_bio` lifecycles.
@@ -158,8 +179,8 @@ Do not copy the npmAgent repository wholesale. Port one kernel hook and one fiel
 - inbound/close/reset TCP lifecycle observations
 - bytes, packets, retransmission, loss, and general UDP flow metrics (bounded UDP DNS observation is implemented)
 - vectored I/O, io_uring, sendfile, kTLS, non-OpenSSL TLS libraries, and complete TCP stream reconstruction
-- Kubernetes Pod/Service/Workload identity
-- WhaTap backend transport
+- Kubernetes Service/Workload identity and historical Pod-IP attribution (current-cache Pod UID enrichment is default-on)
+- full backend storage/query acceptance across all direct TagCount categories and newly enabled UID fields
 - reusable OpenShift manifests and measured least-privilege SCC
 - long-duration pressure/churn qualification and production alerting for coverage/drop counters
 
