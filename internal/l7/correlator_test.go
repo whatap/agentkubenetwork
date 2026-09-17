@@ -49,7 +49,7 @@ func TestCorrelatorHTTP1RequestResponseHeaders(t *testing.T) {
 	if transaction.Method != "GET" || transaction.Path != "/orders/123" || transaction.StatusCode != 200 {
 		t.Fatalf("unexpected HTTP identity: %+v", transaction)
 	}
-	if transaction.ResponseLatencyMicros != 25_000 || transaction.LatencyBoundary != BoundaryResponseHeaders {
+	if transaction.ResponseLatencyMicros != 25_000 || transaction.LatencyBoundary != BoundaryResponseStatus {
 		t.Fatalf("unexpected latency: %+v", transaction)
 	}
 	if transaction.Source != SourceKernelPlaintext {

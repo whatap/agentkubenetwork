@@ -26,13 +26,32 @@ type ProcessResolver interface {
 	Lookup(pid uint32) (flow.Process, bool)
 }
 
+// WindowExporter queues immutable windows without waiting for network I/O.
+// The caller owns its shutdown, after RunEventsWithOptions has finalized windows.
+type WindowExporter interface {
+	Export(flow.Window) error
+	Failed() <-chan struct{}
+	Err() error
+	Dropped() uint64
+}
+
+// TypedEventExporter preserves non-L4 semantics on exporters that support them.
+// It shares the WindowExporter's bounded queue, failure and shutdown contract.
+type TypedEventExporter interface {
+	ExportL7(l7.Transaction) error
+	ExportDNS(dns.Transaction) error
+	ExportL7Drop(l7.Drop) error
+}
+
 type EventOptions struct {
+	PodEnricher         interface{ Enrich(*flow.Observation) }
 	OutputMode          string
 	WindowSize          time.Duration
 	AllowedLateness     time.Duration
 	MaxWindows          int
 	OutputQueueCapacity int
 	OutputDrainTimeout  time.Duration
+	WindowExporter      WindowExporter
 }
 
 func RunEvents(reader collector.EventReader, output io.Writer, nodeName string, maxEvents int, now func() time.Time, resolver DestinationResolver, processes ProcessResolver) error {
@@ -56,15 +75,14 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 	}
 	var readErr error
 	defer func() { retErr = errors.Join(readErr, retErr, encoder.Close()) }()
+	var exportFailed <-chan struct{}
+	if options.WindowExporter != nil {
+		exportFailed = options.WindowExporter.Failed()
+	}
 	correlator := l7.NewCorrelator(l7.Config{})
 	dnsCorrelator := dns.NewCorrelator(0)
 	defer func() {
-		for _, transaction := range dnsCorrelator.Finish(encoder.captureTime()) {
-			if err := encoder.Encode(transaction); err != nil {
-				retErr = errors.Join(retErr, err)
-				break
-			}
-		}
+		retErr = errors.Join(retErr, encodeCollected(encoder, dnsCorrelator.Finish(encoder.captureTime())))
 	}()
 	stream, cancel, capture := pumpEvents(reader, maxEvents, now)
 	encoder.captureTime = capture.time
@@ -100,6 +118,8 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			continue
 		case <-encoder.failed:
 			return fmt.Errorf("write event output: %w", encoder.Err())
+		case <-exportFailed:
+			return fmt.Errorf("export flow windows: %w", options.WindowExporter.Err())
 		case <-retryTick:
 			remaining := pending[:0]
 			for _, item := range pending {
@@ -115,10 +135,8 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			}
 			clear(pending[len(remaining):])
 			pending = remaining
-			for _, transaction := range dnsCorrelator.Expire(capture.watermark()) {
-				if err := encoder.Encode(transaction); err != nil {
-					return fmt.Errorf("expire DNS transaction: %w", err)
-				}
+			if err := encodeCollected(encoder, dnsCorrelator.Expire(capture.watermark())); err != nil {
+				return fmt.Errorf("expire DNS transaction: %w", err)
 			}
 			watermark := capture.watermark()
 			for _, item := range pending {
@@ -167,14 +185,18 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			}}
 			resolveObservation(resolver, &enrichment)
 			attachProcess(processes, event.PID, &enrichment)
+			if options.PodEnricher != nil {
+				options.PodEnricher.Enrich(&enrichment)
+			}
 			fragment.ObserverPID = event.PID
 			fragment.Process = enrichment.Process
 			fragment.SourceResolved = enrichment.SourceResolved
 			fragment.DestinationResolved = enrichment.DestinationResolved
-			for _, transaction := range dnsCorrelator.Process(fragment) {
-				if err := encoder.Encode(transaction); err != nil {
-					return fmt.Errorf("encode DNS transaction: %w", err)
-				}
+			fragment.SourcePod = enrichment.SourcePod
+			fragment.DestinationPod = enrichment.DestinationPod
+			fragment.ObserverPod = enrichment.ObserverPod
+			if err := encodeCollected(encoder, dnsCorrelator.Process(fragment)); err != nil {
+				return fmt.Errorf("encode DNS transaction: %w", err)
 			}
 			continue
 		}
@@ -189,20 +211,17 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 			}}
 			resolveObservation(resolver, &enrichment)
 			attachProcess(processes, event.PID, &enrichment)
+			if options.PodEnricher != nil {
+				options.PodEnricher.Enrich(&enrichment)
+			}
 			fragment.Process = enrichment.Process
 			fragment.SourceResolved = enrichment.SourceResolved
 			fragment.DestinationResolved = enrichment.DestinationResolved
-			for _, result := range correlator.Process(fragment) {
-				if result.Transaction != nil {
-					if err := encoder.Encode(result.Transaction); err != nil {
-						return fmt.Errorf("encode L7 transaction: %w", err)
-					}
-				}
-				if result.Drop != nil {
-					if err := encoder.Encode(result.Drop); err != nil {
-						return fmt.Errorf("encode L7 coverage drop: %w", err)
-					}
-				}
+			fragment.SourcePod = enrichment.SourcePod
+			fragment.DestinationPod = enrichment.DestinationPod
+			fragment.ObserverPod = enrichment.ObserverPod
+			if err := encodeL7Outputs(encoder, correlator.Process(fragment)); err != nil {
+				return fmt.Errorf("encode L7 observations: %w", err)
 			}
 			continue
 		}
@@ -243,6 +262,32 @@ func RunEventsWithOptions(ctx context.Context, reader collector.EventReader, out
 		}
 	}
 	return nil
+}
+
+func encodeL7Outputs(encoder *eventOutput, outputs []l7.Output) error {
+	records := make([]any, 0, len(outputs))
+	for _, output := range outputs {
+		if output.Transaction != nil {
+			records = append(records, output.Transaction)
+		}
+		if output.Drop != nil {
+			records = append(records, output.Drop)
+		}
+	}
+	return encodeCollected(encoder, records)
+}
+
+// encodeCollected preserves a whole batch already removed from a correlator.
+// eventOutput retains JSONL evidence but latches the first export rejection,
+// so subsequent records in this batch cannot be resubmitted to the exporter.
+func encodeCollected[T any](encoder *eventOutput, records []T) error {
+	var firstErr error
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // attachProcess records which userspace process issued the sampled socket

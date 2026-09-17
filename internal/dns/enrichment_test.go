@@ -24,7 +24,8 @@ func TestCorrelatorEnrichmentSnapshot(t *testing.T) {
 				c.Process(safetyQuery(2, safetyBase))
 			}
 			if mode == "parse" {
-				query.Payload = []byte{1}
+				// Preserve attribution only when the malformed query has a full header.
+				query.Payload = []byte{0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0}
 			}
 			var got []Transaction
 			if mode == "orphan" {

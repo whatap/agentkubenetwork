@@ -74,7 +74,9 @@ Add one behavior at a time:
 
 ### Phase 4 — backend tracer bullet
 
-Send one versioned window through the real generic pack/ingest path and read it back via query/API before building the final UI.
+The collector now supports opt-in [standalone Go TagCount export](direct-tagcount.md): completed L4 windows enter a bounded in-process queue and a Go-owned WhaTap TCP session. Java and a separate JSONL sender are not required. The optional Java bridge remains supported.
+
+TCP write completion is not storage acceptance. Send one controlled versioned window to an approved project and read it back via query/API before building the final UI. L7/DNS export and production qualification remain separate contracts.
 
 ### Phase 5 — operator packaging
 

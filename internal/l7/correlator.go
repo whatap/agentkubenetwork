@@ -14,6 +14,7 @@ const (
 	ProtocolHTTP1           = "http1"
 	ProtocolHTTP2           = "http2"
 	BoundaryResponseHeaders = "request_to_response_headers"
+	BoundaryResponseStatus  = "request_to_response_status"
 	DropOverlappingRequest  = "overlapping_request"
 	DropProtocolUpgrade     = "protocol_upgrade"
 	DropResponseTimeout     = "response_timeout"
@@ -53,6 +54,9 @@ type Fragment struct {
 	Process             *flow.Process
 	SourceResolved      *flow.ResolvedEndpoint
 	DestinationResolved *flow.ResolvedEndpoint
+	SourcePod           *flow.Pod
+	DestinationPod      *flow.Pod
+	ObserverPod         *flow.Pod
 }
 
 type Transaction struct {
@@ -71,6 +75,9 @@ type Transaction struct {
 	Process               *flow.Process          `json:"process,omitempty"`
 	SourceResolved        *flow.ResolvedEndpoint `json:"sourceResolved,omitempty"`
 	DestinationResolved   *flow.ResolvedEndpoint `json:"destinationResolved,omitempty"`
+	SourcePod             *flow.Pod              `json:"sourcePod,omitempty"`
+	DestinationPod        *flow.Pod              `json:"destinationPod,omitempty"`
+	ObserverPod           *flow.Pod              `json:"observerPod,omitempty"`
 }
 
 type Drop struct {
@@ -122,12 +129,13 @@ type pendingHTTP1 struct {
 // Identity belongs to the observer at request capture, not to a later Pod/IP
 // lookup at response time. Never retain raw payloads or process command lines.
 type observationIdentity struct {
-	process             *flow.Process
-	source, destination *flow.ResolvedEndpoint
+	process                                *flow.Process
+	source, destination                    *flow.ResolvedEndpoint
+	sourcePod, destinationPod, observerPod *flow.Pod
 }
 
 func identityFrom(fragment Fragment) observationIdentity {
-	identity := observationIdentity{}
+	identity := observationIdentity{sourcePod: snapshotPod(fragment.SourcePod), destinationPod: snapshotPod(fragment.DestinationPod), observerPod: snapshotPod(fragment.ObserverPod)}
 	if fragment.Process != nil {
 		process := *fragment.Process
 		process.Cmdline = ""
@@ -142,6 +150,14 @@ func identityFrom(fragment Fragment) observationIdentity {
 		identity.destination = &destination
 	}
 	return identity
+}
+
+func snapshotPod(pod *flow.Pod) *flow.Pod {
+	if pod == nil {
+		return nil
+	}
+	copy := *pod
+	return &copy
 }
 
 type Correlator struct {
@@ -290,10 +306,13 @@ func (correlator *Correlator) Process(fragment Fragment) []Output {
 		Path:                  pending.path,
 		StatusCode:            statusCode,
 		ResponseLatencyMicros: (completedNS - pending.startedNS) / uint64(time.Microsecond),
-		LatencyBoundary:       BoundaryResponseHeaders,
+		LatencyBoundary:       BoundaryResponseStatus,
 		Process:               pending.identity.process,
 		SourceResolved:        pending.identity.source,
 		DestinationResolved:   pending.identity.destination,
+		SourcePod:             pending.identity.sourcePod,
+		DestinationPod:        pending.identity.destinationPod,
+		ObserverPod:           pending.identity.observerPod,
 	}
 	return append(expired, Output{Transaction: transaction})
 }
@@ -479,6 +498,9 @@ func (correlator *Correlator) processHTTP2(fragment Fragment) ([]Output, bool) {
 			Process:               pending.identity.process,
 			SourceResolved:        pending.identity.source,
 			DestinationResolved:   pending.identity.destination,
+			SourcePod:             pending.identity.sourcePod,
+			DestinationPod:        pending.identity.destinationPod,
+			ObserverPod:           pending.identity.observerPod,
 		}})
 	}
 	return outputs, true

@@ -40,6 +40,7 @@ func run(args []string, in io.Reader, out, errout io.Writer) (exitCode int) {
 		Skipped    int    `json:"skipped"`
 		Partial    int    `json:"skipped_partial"`
 		Unmeasured int    `json:"skipped_unmeasured"`
+		Incomplete int    `json:"skipped_incomplete_tuple"`
 		Ignored    int    `json:"ignored"`
 		Stage      string `json:"stage"`
 	}{Stage: "node_queue"}
@@ -88,6 +89,9 @@ func run(args []string, in io.Reader, out, errout io.Writer) (exitCode int) {
 			summary.Skipped++
 		case errors.Is(e, bridge.ErrNoSamples):
 			summary.Unmeasured++
+			summary.Skipped++
+		case errors.Is(e, bridge.ErrIncompleteTuple):
+			summary.Incomplete++
 			summary.Skipped++
 		case e != nil:
 			return fail(e)

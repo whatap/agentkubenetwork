@@ -22,6 +22,7 @@ import (
 var (
 	ErrPartialWindow     = errors.New("partial window")
 	ErrNoSamples         = errors.New("no SRTT samples")
+	ErrIncompleteTuple   = errors.New("incomplete TCP tuple")
 	ErrRejected          = errors.New("node queue rejected request")
 	ErrAmbiguousDelivery = errors.New("ambiguous delivery; do not retry")
 )

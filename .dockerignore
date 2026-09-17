@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!dist/
+!dist/linux/
+!dist/linux/amd64/
+!dist/linux/amd64/agentkubenetwork
+!dist/linux/arm64/
+!dist/linux/arm64/agentkubenetwork
