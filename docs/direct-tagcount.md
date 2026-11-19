@@ -16,6 +16,8 @@ L7/DNS/coverage도 기존 타입 그대로 별도 TagCount category로 전송하
 
 ## 설정
 
+첫 화면용 Workload 관계는 별도 opt-in category로 요약한다. [토폴로지 TagCount 계약](topology-tagcount.md)의 `-topology-summary` 설정·추가 informer 권한·MAX 조회 규칙을 참고한다. 기본 배포와 기존 상세 category는 유지되며, 운영 등록/배포는 별도 gate다.
+
 승인된 테스트 프로젝트의 키와 수집 서버를 별도의 접근 제한 파일에 둔다. 아래 값은 **자리 표시자**이며 실제 키를 저장소·명령행·공유 로그에 넣지 않는다.
 
 ```properties
@@ -88,7 +90,7 @@ sudo ./bin/agentkubenetwork \
 
 | 항목 | 의미 |
 |---|---|
-| `queued` | 전송 큐에 들어간 레코드(L4/HTTP/DNS/coverage 합계) |
+| `queued` | 전송 큐에 들어간 레코드(L4/HTTP/DNS/coverage 및 opt-in topology 합계) |
 | `written` | TCP 쓰기가 오류 없이 끝난 레코드; **서버 저장/ACK가 아님** |
 | `failed` | 전송 시도에서 오류가 난 레코드; 수신 여부가 불명확할 수 있음 |
 | `pending` | 큐에 들어갔지만 쓰기 완료/실패로 아직 분류되지 않은 레코드 |
