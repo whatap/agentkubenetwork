@@ -11,8 +11,9 @@ import (
 )
 
 type Cache struct {
-	index  cache.Indexer
-	synced func() bool
+	index     cache.Indexer
+	synced    func() bool
+	workloads *workloadCache
 }
 
 func Indexers() cache.Indexers {
@@ -70,7 +71,11 @@ func (c *Cache) lookup(index, key string, at time.Time) *flow.Pod {
 	if p.UID == "" || (index == "ip" && p.Spec.HostNetwork) || (!at.IsZero() && !p.CreationTimestamp.IsZero() && at.Before(p.CreationTimestamp.Time)) {
 		return nil
 	}
-	return &flow.Pod{UID: string(p.UID), Namespace: p.Namespace, Name: p.Name}
+	result := &flow.Pod{UID: string(p.UID), Namespace: p.Namespace, Name: p.Name}
+	if c.workloads != nil {
+		c.workloads.resolve(p, result, at)
+	}
+	return result
 }
 func (c *Cache) Enrich(o *flow.Observation) {
 	source, destination := o.Flow.Source.Address, o.Flow.Destination.Address
