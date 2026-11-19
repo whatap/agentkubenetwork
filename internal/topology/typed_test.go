@@ -52,7 +52,9 @@ func TestDNSResultAndUnknownOutcomeRemainDistinct(t *testing.T) {
 		known, failure       bool
 	}{
 		{"success", dns.OutcomeResponse, "NOERROR", 10, true, false},
-		{"failure", dns.OutcomeResponse, "NXDOMAIN", 10, true, true},
+		{"nxdomain answer is not a failure", dns.OutcomeResponse, "NXDOMAIN", 10, true, false},
+		{"servfail", dns.OutcomeResponse, "SERVFAIL", 10, true, true},
+		{"refused", dns.OutcomeResponse, "REFUSED", 10, true, true},
 		{"orphan or zero sample", dns.OutcomeResponse, "NOERROR", 0, false, false},
 		{"timeout", dns.OutcomeNoResponse, "", 0, false, false},
 		{"parse", dns.OutcomeParseError, "", 0, false, false},

@@ -61,7 +61,7 @@ Operator가 `networkAgent.env`를 지원하는 배포에서는 기존 CR의 환�
 |---|---|---|---|
 | `observed` | integer flag 0/1 | MAX | 통신 관측 존재 |
 | `result_observed` | integer flag 0/1 | MAX | 분류 가능한 HTTP 최종 status / 매칭 DNS 응답 결과 존재 |
-| `error_observed` | integer flag 0/1 | MAX | HTTP 4xx/5xx 또는 DNS 비-NOERROR 결과 존재 |
+| `error_observed` | integer flag 0/1 | MAX | HTTP 4xx/5xx 또는 DNS 오류 응답(SERVFAIL·REFUSED 등) 존재. NXDOMAIN은 검색 도메인 확장에서 정상적으로 나오므로 제외 |
 | `last_seen_ms` | int64 epoch-ms | MAX | 마지막 실제 관측 시각, flush 시각 아님 |
 
 Timeout, parse 실패, orphan 응답, coverage drop을 정상 결과로 바꾸지 않는다. `error_observed=0`은 서비스 정상이나 수집 완전성 보장이 아니다. 결과 관측 여부 및 별도 수집 품질을 함께 표시한다. RPS·요청 수·연결 수·SRTT·p95는 이 category에서 계산하지 않는다.

@@ -68,7 +68,10 @@ func (a *Aggregator) ObserveDNS(t dns.Transaction) error {
 		}
 	}
 	s.ResultObserved = t.Outcome == dns.OutcomeResponse && t.LatencyMicros > 0
-	s.ErrorObserved = s.ResultObserved && t.ResponseCode != "NOERROR"
+	// NXDOMAIN is a negative answer, not a server failure. Pods produce it
+	// routinely while expanding resolv.conf search domains (ndots), so
+	// counting it would mark nearly every DNS edge as failed.
+	s.ErrorObserved = s.ResultObserved && t.ResponseCode != "NOERROR" && t.ResponseCode != "NXDOMAIN"
 	return a.observe(t.ObservedAt, s)
 }
 
