@@ -30,12 +30,14 @@ func (a *Aggregator) ObserveL7(t l7.Transaction) error {
 }
 
 // ObserveDNS does not turn timeout, orphan response, or parse/coverage loss into
-// success. The existing DNS type has no matched bit: positive measured latency
-// proves a matched query; zero includes both orphan and sub-microsecond samples
-// and is therefore conservatively result-unconfirmed in this summary.
+// success. A response is a confirmed result only when the correlator matched it
+// to a query and measured the exchange (LatencyMeasured); a measured sample may
+// be 0 µs. Like the DNS pack, it rejects a latency value without a measurement
+// and a measurement without a response: the correlator emits neither.
 func (a *Aggregator) ObserveDNS(t dns.Transaction) error {
 	if t.SchemaVersion != dns.SchemaVersion || !validTime(t.ObservedAt) || t.Protocol != "udp" ||
-		!validResolved(t.ClientResolved) || !validResolved(t.ServerResolved) {
+		!validResolved(t.ClientResolved) || !validResolved(t.ServerResolved) ||
+		(!t.LatencyMeasured && t.LatencyMicros != 0) {
 		return ErrInvalidObservation
 	}
 	switch t.Outcome {
@@ -44,7 +46,7 @@ func (a *Aggregator) ObserveDNS(t dns.Transaction) error {
 			return ErrInvalidObservation
 		}
 	case dns.OutcomeNoResponse, dns.OutcomeIncomplete, dns.OutcomeParseError:
-		if t.ResponseCode != "" || t.LatencyMicros != 0 {
+		if t.ResponseCode != "" || t.LatencyMeasured {
 			return ErrInvalidObservation
 		}
 	default:
@@ -67,7 +69,7 @@ func (a *Aggregator) ObserveDNS(t dns.Transaction) error {
 			s.Source, s.Destination = s.Destination, s.Source
 		}
 	}
-	s.ResultObserved = t.Outcome == dns.OutcomeResponse && t.LatencyMicros > 0
+	s.ResultObserved = t.Outcome == dns.OutcomeResponse && t.LatencyMeasured
 	// NXDOMAIN is a negative answer, not a server failure. Pods produce it
 	// routinely while expanding resolv.conf search domains (ndots), so
 	// counting it would mark nearly every DNS edge as failed.

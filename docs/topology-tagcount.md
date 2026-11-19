@@ -69,7 +69,7 @@ Operator가 `networkAgent.env`를 지원하는 배포에서는 기존 CR의 환�
 
 Timeout, parse 실패, orphan 응답, coverage drop을 정상 결과로 바꾸지 않는다. `error_observed=0`은 서비스 정상이나 수집 완전성 보장이 아니다. 결과 관측 여부 및 별도 수집 품질을 함께 표시한다. RPS·요청 수·연결 수·SRTT·p95는 이 category에서 계산하지 않는다.
 
-기존 DNS 거래 타입에는 matched 여부가 별도 필드로 없다. 따라서 양의 measured latency가 있는 응답만 요약의 결과 관측으로 인정한다. orphan과 구분할 수 없는 0µs 응답은 원시 데이터에 남기되 요약에서는 결과 미확인이다. wildcard/미바인딩 DNS tuple과 포트 0인 L4 진단 창은 그릴 수 있는 관계가 아니므로 요약에서 제외한다. 기존 진단/skip 경로는 유지한다.
+DNS 응답은 correlator가 질의와 짝지어 측정한 경우(JSONL의 `latencyMeasured=true`)에만 요약의 결과 관측으로 인정한다. 측정값이 0µs여도 측정된 응답이면 결과다. 짝이 없는 orphan 응답과 timestamp를 쓸 수 없는 응답은 원시 데이터에 남기되 요약에서는 결과 미확인이다. wildcard/미바인딩 DNS tuple과 포트 0인 L4 진단 창은 그릴 수 있는 관계가 아니므로 요약에서 제외한다. 기존 진단/skip 경로는 유지한다.
 
 ## 최초 조회 계약
 

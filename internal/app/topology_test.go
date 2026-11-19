@@ -75,7 +75,7 @@ func TestTopologyPipelineFinalizesL4AndDNSAndHTTP(t *testing.T) {
 	observation := flow.Observation{ObservedAt: at, Flow: http.Flow, RTT: flow.Distribution{Count: 1, SumMicros: 1, MinMicros: 1, MaxMicros: 1}}
 	observation.Flow.Direction = "connection"
 	dnsRecord := dns.Transaction{SchemaVersion: dns.SchemaVersion, ObservedAt: at, NodeName: "node", Protocol: "udp",
-		Client: http.Flow.Source, Server: flow.Endpoint{Address: "10.0.0.53", Port: 53}, Outcome: dns.OutcomeResponse, ResponseCode: "NOERROR", LatencyMicros: 1}
+		Client: http.Flow.Source, Server: flow.Endpoint{Address: "10.0.0.53", Port: 53}, Outcome: dns.OutcomeResponse, ResponseCode: "NOERROR", LatencyMeasured: true, LatencyMicros: 1}
 	for _, record := range []any{observation, &http, &dnsRecord} {
 		if err := encoder.Encode(record); err != nil {
 			t.Fatal(err)

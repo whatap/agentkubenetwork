@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/whatap/agentkubenetwork/internal/dns"
 	"github.com/whatap/agentkubenetwork/internal/flow"
 	"github.com/whatap/agentkubenetwork/internal/tagcount"
 	"github.com/whatap/golib/lang/pack"
@@ -89,5 +91,64 @@ func TestTopologyPipelineProductionWireRetainsDetailAndCollapsesReplicas(t *test
 	}
 	if summary := exporter.Snapshot(); summary.Dropped != 0 || summary.Failed != 0 || summary.Pending != 0 {
 		t.Fatalf("wire queue incomplete: %+v", summary)
+	}
+}
+
+// A matched DNS response measured at 0 µs is valid for the real DNS pack and is
+// a confirmed result in the summary. An orphan response keeps its detail record
+// but confirms neither a result nor an error.
+func TestTopologyPipelineProductionWireCountsMeasuredDNSResponses(t *testing.T) {
+	at := time.Date(2026, 9, 17, 0, 0, 1, 0, time.UTC)
+	sender := &topologyWireSender{}
+	exporter, err := tagcount.NewExporter(sender, tagcount.ExporterConfig{NodeName: "node", QueueCapacity: 16, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exporter.Close() })
+	encoder, err := newEventOutput(io.Discard, "node", func() time.Time { return at }, topologyTestOptions(exporter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		client   string
+		measured bool
+	}{{"10.0.0.1", true}, {"10.0.0.2", false}} {
+		tx := dns.Transaction{SchemaVersion: dns.SchemaVersion, ObservedAt: at, NodeName: "node", Protocol: "udp",
+			Client: flow.Endpoint{Address: tc.client, Port: 42000}, Server: flow.Endpoint{Address: "10.0.0.53", Port: 53},
+			QueryName: "name.example", QueryType: "A", Outcome: dns.OutcomeResponse, ResponseCode: "SERVFAIL", LatencyMeasured: tc.measured}
+		if err := encoder.Encode(tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	type flags struct{ result, failure int64 }
+	summaries := map[string]flags{}
+	measured := map[string]bool{}
+	for _, wire := range sender.frames {
+		p, ok := pack.ToPack(wire).(*pack.TagCountPack)
+		if !ok {
+			t.Fatal("invalid TagCount wire")
+		}
+		switch p.Category {
+		case tagcount.DNSCategory:
+			measured[p.Tags.GetString("client_addr")] = p.Data.ContainsKey("latency_us")
+		case tagcount.TopologyCategory:
+			summaries[p.Tags.GetString("src_address")] = flags{p.Data.GetLong("result_observed"), p.Data.GetLong("error_observed")}
+		default:
+			t.Fatalf("unexpected category %s", p.Category)
+		}
+	}
+	if len(measured) != 2 || !measured["10.0.0.1"] || measured["10.0.0.2"] {
+		t.Fatalf("DNS detail records with a latency sample: %v", measured)
+	}
+	if want := (map[string]flags{"10.0.0.1": {1, 1}, "10.0.0.2": {0, 0}}); !reflect.DeepEqual(summaries, want) {
+		t.Fatalf("summary flags by client = %v; want %v", summaries, want)
 	}
 }

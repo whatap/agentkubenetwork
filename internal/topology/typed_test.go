@@ -48,23 +48,27 @@ func TestHTTPMergesMonotoneFlagsAcrossPortsAndObservers(t *testing.T) {
 func TestDNSResultAndUnknownOutcomeRemainDistinct(t *testing.T) {
 	for _, tc := range []struct {
 		name, outcome, rcode string
+		measured             bool
 		latency              uint64
 		known, failure       bool
 	}{
-		{"success", dns.OutcomeResponse, "NOERROR", 10, true, false},
-		{"nxdomain answer is not a failure", dns.OutcomeResponse, "NXDOMAIN", 10, true, false},
-		{"servfail", dns.OutcomeResponse, "SERVFAIL", 10, true, true},
-		{"refused", dns.OutcomeResponse, "REFUSED", 10, true, true},
-		{"orphan or zero sample", dns.OutcomeResponse, "NOERROR", 0, false, false},
-		{"timeout", dns.OutcomeNoResponse, "", 0, false, false},
-		{"parse", dns.OutcomeParseError, "", 0, false, false},
-		{"incomplete", dns.OutcomeIncomplete, "", 0, false, false},
+		{"success", dns.OutcomeResponse, "NOERROR", true, 10, true, false},
+		{"nxdomain answer is not a failure", dns.OutcomeResponse, "NXDOMAIN", true, 10, true, false},
+		{"servfail", dns.OutcomeResponse, "SERVFAIL", true, 10, true, true},
+		{"refused", dns.OutcomeResponse, "REFUSED", true, 10, true, true},
+		{"measured zero sample is a result", dns.OutcomeResponse, "NOERROR", true, 0, true, false},
+		{"measured zero servfail is an error", dns.OutcomeResponse, "SERVFAIL", true, 0, true, true},
+		{"orphan response", dns.OutcomeResponse, "NOERROR", false, 0, false, false},
+		{"orphan servfail is not a confirmed error", dns.OutcomeResponse, "SERVFAIL", false, 0, false, false},
+		{"timeout", dns.OutcomeNoResponse, "", false, 0, false, false},
+		{"parse", dns.OutcomeParseError, "", false, 0, false, false},
+		{"incomplete", dns.OutcomeIncomplete, "", false, 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _ := New(Config{ClusterID: "cluster-a", WindowSize: time.Minute, MaxEntries: 1})
 			tx := dns.Transaction{SchemaVersion: dns.SchemaVersion, ObservedAt: testStart.Add(time.Second), NodeName: "node", Protocol: "udp",
 				Client: flow.Endpoint{Address: "10.0.0.1", Port: 42000}, Server: flow.Endpoint{Address: "10.0.0.53", Port: 53},
-				Outcome: tc.outcome, ResponseCode: tc.rcode, LatencyMicros: tc.latency}
+				Outcome: tc.outcome, ResponseCode: tc.rcode, LatencyMeasured: tc.measured, LatencyMicros: tc.latency}
 			if err := a.ObserveDNS(tx); err != nil {
 				t.Fatal(err)
 			}
@@ -81,6 +85,31 @@ func TestDNSResultAndUnknownOutcomeRemainDistinct(t *testing.T) {
 			tx.Client = flow.Endpoint{Address: "0.0.0.0"}
 			if err := a.ObserveDNS(tx); err != nil || a.Len() != 0 {
 				t.Fatalf("unattributable DNS must remain raw-only: %v", err)
+			}
+		})
+	}
+}
+
+// The correlator reports a latency only when it measured one, and it measures
+// only responses. Like the DNS pack, the summary rejects any other record.
+func TestDNSRejectsLatencyThatWasNotMeasured(t *testing.T) {
+	for name, mutate := range map[string]func(*dns.Transaction){
+		"latency without measurement": func(tx *dns.Transaction) { tx.LatencyMeasured = false },
+		"measurement without a response": func(tx *dns.Transaction) {
+			tx.Outcome, tx.ResponseCode, tx.LatencyMicros = dns.OutcomeNoResponse, "", 0
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := New(Config{ClusterID: "cluster-a", WindowSize: time.Minute, MaxEntries: 1})
+			tx := dns.Transaction{SchemaVersion: dns.SchemaVersion, ObservedAt: testStart.Add(time.Second), NodeName: "node", Protocol: "udp",
+				Client: flow.Endpoint{Address: "10.0.0.1", Port: 42000}, Server: flow.Endpoint{Address: "10.0.0.53", Port: 53},
+				Outcome: dns.OutcomeResponse, ResponseCode: "NOERROR", LatencyMeasured: true, LatencyMicros: 10}
+			if err := a.ObserveDNS(tx); err != nil || len(a.FlushAll()) != 1 {
+				t.Fatalf("the unmodified record must be valid: %v", err)
+			}
+			mutate(&tx)
+			if err := a.ObserveDNS(tx); !errors.Is(err, ErrInvalidObservation) || a.Len() != 0 {
+				t.Fatalf("an impossible latency state was admitted: err=%v entries=%d", err, a.Len())
 			}
 		})
 	}
