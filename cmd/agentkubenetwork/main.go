@@ -17,6 +17,7 @@ import (
 	"github.com/whatap/agentkubenetwork/internal/conntrack"
 	"github.com/whatap/agentkubenetwork/internal/podidentity"
 	"github.com/whatap/agentkubenetwork/internal/process"
+	"github.com/whatap/agentkubenetwork/internal/topology"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -56,13 +57,13 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	allowedLateness := flags.Duration("allowed-lateness", time.Second, "lateness allowance before finalizing live windows")
 	maxWindows := flags.Int("max-windows", 16384, "maximum active identity/windows before explicit coverage drops")
 	queueCapacity := flags.Int("output-queue", 4096, "maximum queued output records; overflow is reported as telemetry loss")
-	drainTimeout := flags.Duration("output-drain-timeout", 5*time.Second, "maximum shutdown wait for output delivery")
+	drainTimeout := flags.Duration("output-drain-timeout", 5*time.Second, "maximum shutdown wait for output delivery, including topology summaries waiting for the TagCount queue")
 	exportMode := flags.String("export", "none", "optional backend export: none or tagcount (live windows/both only)")
 	stdout := flags.String("stdout", "auto", "telemetry stdout: auto (none with tagcount, otherwise jsonl), jsonl, or none; overrides WHATAP_STDOUT")
 	logLevel := flags.String("log-level", "info", "operational log level: debug, info, warn, or error (never enables telemetry stdout); overrides WHATAP_LOG_LEVEL")
 	logInterval := flags.Duration("log-interval", time.Minute, "TagCount summary interval; zero disables periodic summaries, not final summaries; overrides WHATAP_LOG_INTERVAL")
 	whatapConfig := flags.String("whatap-config", "", "optional whatap properties file; WHATAP_ACCESSKEY and WHATAP_SERVER_HOST environment variables take precedence")
-	tagcountQueue := flags.Int("tagcount-queue", 1024, "maximum queued TagCount windows (1..16384); overflow is counted")
+	tagcountQueue := flags.Int("tagcount-queue", 1024, "maximum queued TagCount records (1..16384); detailed overflow is counted, topology summaries wait for room")
 	tagcountTimeout := flags.Duration("tagcount-timeout", 5*time.Second, "whole TagCount connect/handshake/write deadline")
 	tagcountDrain := flags.Duration("tagcount-drain-timeout", 5*time.Second, "maximum shutdown wait for TagCount writes")
 	nodeName := flags.String("node-name", os.Getenv("NODE_NAME"), "node identity for eBPF observations")
@@ -76,6 +77,10 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	podIdentity := flags.Bool("pod-identity", true, "enrich live observations with Pod UIDs using one read-only Pod informer (ebpf only; disable with -pod-identity=false)")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig for Pod identity; empty uses in-cluster configuration only")
 	podSyncTimeout := flags.Duration("pod-sync-timeout", 10*time.Second, "Pod informer startup sync and shutdown bound")
+	topologySummary := flags.Bool("topology-summary", false, "opt in to workload relationship TagCount summaries and read-only ReplicaSet/Job informers; overrides WHATAP_TOPOLOGY_SUMMARY")
+	topologyCluster := flags.String("topology-cluster-id", "", "cluster name shared by all observers; defaults to the access key's project code (one WhaTap Kubernetes project monitors one cluster); overrides WHATAP_TOPOLOGY_CLUSTER_ID")
+	topologyWindow := flags.Duration("topology-window", time.Minute, "relationship summary window; does not change the raw flow window; overrides WHATAP_TOPOLOGY_WINDOW")
+	topologyMaxEntries := flags.Int("topology-max-entries", 4096, "maximum active relationship/window entries, and of summaries waiting for the TagCount queue (1..65536); exceeding either fails explicitly; overrides WHATAP_TOPOLOGY_MAX_ENTRIES")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -85,20 +90,61 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	if err := applyLoggingEnvironment(flags); err != nil {
 		return err
 	}
+	if err := applyTopologyEnvironment(flags); err != nil {
+		return err
+	}
 	if err := validateLogging(*logLevel, *logInterval); err != nil {
 		return err
 	}
-	var podIdentitySet, podSyncTimeoutSet bool
+	var podIdentitySet, podSyncTimeoutSet, topologyOptionsSet, topologyClusterSet bool
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "pod-identity":
 			podIdentitySet = true
 		case "pod-sync-timeout":
 			podSyncTimeoutSet = true
+		case "topology-cluster-id":
+			topologyClusterSet = true
+			topologyOptionsSet = true
+		case "topology-window", "topology-max-entries":
+			topologyOptionsSet = true
 		}
 	})
 	if !podIdentitySet && *source != "ebpf" {
 		*podIdentity = false
+	}
+	var topologyConfig *topology.Config
+	if *topologySummary {
+		if *source != "ebpf" {
+			return errors.New("topology summary requires -source=ebpf")
+		}
+		if *exportMode != "tagcount" {
+			return errors.New("topology summary requires -export=tagcount")
+		}
+		if !*podIdentity {
+			return errors.New("topology summary requires -pod-identity")
+		}
+		// Unset means the project code, filled in once the access key is parsed.
+		// A value that was given, including an empty one, must be a valid name.
+		if topologyClusterSet {
+			if len(*topologyCluster) == 0 || len(*topologyCluster) > 253 {
+				return errors.New("topology-cluster-id must contain 1..253 printable non-whitespace ASCII bytes")
+			}
+			for _, c := range *topologyCluster {
+				if c < 33 || c > 126 {
+					return errors.New("topology-cluster-id must contain 1..253 printable non-whitespace ASCII bytes")
+				}
+			}
+		}
+		if *topologyWindow < time.Millisecond || *topologyWindow > time.Minute || *topologyWindow%time.Millisecond != 0 || *windowSize <= 0 || *topologyWindow%*windowSize != 0 {
+			return errors.New("topology window must be whole milliseconds in 1ms..60s and a multiple of the flow window")
+		}
+		if *topologyMaxEntries < 1 || *topologyMaxEntries > 65536 {
+			return errors.New("topology max entries must be between 1 and 65536")
+		}
+		topologyConfig = &topology.Config{ClusterID: *topologyCluster, WindowSize: *topologyWindow, MaxEntries: *topologyMaxEntries}
+	} else if topologyOptionsSet {
+		return errors.New("topology configuration requires -topology-summary")
 	}
 	if *exportMode != "none" && *exportMode != "tagcount" {
 		return fmt.Errorf("unsupported backend export %q", *exportMode)
@@ -153,7 +199,7 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 		}
 		config := bpfRunConfig{NodeName: *nodeName, MaxEvents: *maxEvents, OpenSSLLibraries: splitNonEmpty(*opensslLibrary), ConntrackEnabled: *conntrackEnabled, ConntrackTTL: *conntrackTTL, ProcessEnabled: *processEnabled, ProcRoot: *procRoot,
 			PodIdentity: *podIdentity, Kubeconfig: *kubeconfig, PodSyncTimeout: *podSyncTimeout,
-			Events: app.EventOptions{OutputMode: *outputMode, WindowSize: *windowSize, AllowedLateness: *allowedLateness, MaxWindows: *maxWindows, OutputQueueCapacity: *queueCapacity, OutputDrainTimeout: *drainTimeout}}
+			Events: app.EventOptions{OutputMode: *outputMode, WindowSize: *windowSize, AllowedLateness: *allowedLateness, MaxWindows: *maxWindows, OutputQueueCapacity: *queueCapacity, OutputDrainTimeout: *drainTimeout, Topology: topologyConfig}}
 		if config.MaxEvents < 0 || config.Events.WindowSize <= 0 || config.Events.AllowedLateness < 0 || config.Events.MaxWindows <= 0 || config.Events.OutputQueueCapacity <= 0 || config.Events.OutputDrainTimeout <= 0 {
 			return errors.New("invalid live limits: window, max-windows, output-queue and drain timeout must be positive; max-events and allowed-lateness must be nonnegative")
 		}
@@ -180,7 +226,11 @@ func runBPF(ctx context.Context, output io.Writer, open bpfOpener, config bpfRun
 		if err != nil {
 			return fmt.Errorf("pod identity configuration: %w", err)
 		}
-		pods, stop, startErr := podidentity.Start(ctx, kube, config.PodSyncTimeout)
+		startPods := podidentity.Start
+		if config.Events.Topology != nil {
+			startPods = podidentity.StartWithWorkloads
+		}
+		pods, stop, startErr := startPods(ctx, kube, config.PodSyncTimeout)
 		if startErr != nil {
 			return startErr
 		}

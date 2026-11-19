@@ -53,6 +53,8 @@ func runTagCount(ctx context.Context, output, diagnostics io.Writer, open bpfOpe
 	if err != nil {
 		return fmt.Errorf("configure direct TagCount transport: %w", err)
 	}
+	pcode, _ := sender.Identity()
+	config.Events.Topology = defaultTopologyClusterID(config.Events.Topology, pcode)
 	exporter, err = tagcount.NewExporter(sender, tagcount.ExporterConfig{NodeName: config.NodeName, QueueCapacity: options.QueueCapacity, DrainTimeout: options.DrainTimeout})
 	if err != nil {
 		return errors.Join(err, sender.Close())

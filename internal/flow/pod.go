@@ -4,9 +4,12 @@ import "cmp"
 
 // Pod is a cache-derived Kubernetes identity, never an IP-based surrogate UID.
 type Pod struct {
-	UID       string `json:"uid"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
+	UID          string `json:"uid"`
+	Namespace    string `json:"namespace"`
+	Name         string `json:"name"`
+	WorkloadUID  string `json:"workload_uid,omitempty"`
+	WorkloadName string `json:"workload_name,omitempty"`
+	WorkloadKind string `json:"workload_kind,omitempty"`
 }
 
 func comparePod(a, b *Pod) int {

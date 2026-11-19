@@ -11,6 +11,7 @@ import (
 	"github.com/whatap/agentkubenetwork/internal/dns"
 	"github.com/whatap/agentkubenetwork/internal/flow"
 	"github.com/whatap/agentkubenetwork/internal/l7"
+	"github.com/whatap/agentkubenetwork/internal/topology"
 )
 
 // DestinationResolver translates an original (pre-NAT) flow tuple into the
@@ -43,6 +44,21 @@ type TypedEventExporter interface {
 	ExportL7Drop(l7.Drop) error
 }
 
+// TopologyExporter shares the bounded queue and lifecycle of WindowExporter.
+// Presence summaries are opt-in and never replace the detailed observations.
+// ExportTopology returns topology.ErrNotQueued when the queue has no room. That
+// is not a loss: the pipeline keeps the summary and offers it again.
+type TopologyExporter interface {
+	ExportTopology(topology.Summary) error
+}
+
+// A TopologyExporter that shares a bounded queue with the detailed records
+// implements topologyBurster, and the pipeline then queues at most that many
+// summaries in one flush.
+type topologyBurster interface {
+	TopologyBurst() int
+}
+
 type EventOptions struct {
 	PodEnricher         interface{ Enrich(*flow.Observation) }
 	OutputMode          string
@@ -52,6 +68,7 @@ type EventOptions struct {
 	OutputQueueCapacity int
 	OutputDrainTimeout  time.Duration
 	WindowExporter      WindowExporter
+	Topology            *topology.Config
 }
 
 func RunEvents(reader collector.EventReader, output io.Writer, nodeName string, maxEvents int, now func() time.Time, resolver DestinationResolver, processes ProcessResolver) error {
