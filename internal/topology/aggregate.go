@@ -78,6 +78,10 @@ var ErrCapacity = errors.New("topology entry capacity reached")
 // ErrInvalidObservation means no evidence from the input was retained.
 var ErrInvalidObservation = errors.New("invalid topology observation")
 
+// ErrNotQueued is returned by an exporter that has no room for a summary. The
+// summary is not lost: the caller still owns it and offers it again.
+var ErrNotQueued = errors.New("topology summary was not queued")
+
 func New(config Config) (*Aggregator, error) {
 	if !validText(config.ClusterID, 253) || config.MaxEntries <= 0 || config.MaxEntries > 65536 ||
 		config.WindowSize < time.Millisecond || config.WindowSize > time.Minute || config.WindowSize%time.Millisecond != 0 {

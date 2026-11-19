@@ -57,13 +57,13 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	allowedLateness := flags.Duration("allowed-lateness", time.Second, "lateness allowance before finalizing live windows")
 	maxWindows := flags.Int("max-windows", 16384, "maximum active identity/windows before explicit coverage drops")
 	queueCapacity := flags.Int("output-queue", 4096, "maximum queued output records; overflow is reported as telemetry loss")
-	drainTimeout := flags.Duration("output-drain-timeout", 5*time.Second, "maximum shutdown wait for output delivery")
+	drainTimeout := flags.Duration("output-drain-timeout", 5*time.Second, "maximum shutdown wait for output delivery, including topology summaries waiting for the TagCount queue")
 	exportMode := flags.String("export", "none", "optional backend export: none or tagcount (live windows/both only)")
 	stdout := flags.String("stdout", "auto", "telemetry stdout: auto (none with tagcount, otherwise jsonl), jsonl, or none; overrides WHATAP_STDOUT")
 	logLevel := flags.String("log-level", "info", "operational log level: debug, info, warn, or error (never enables telemetry stdout); overrides WHATAP_LOG_LEVEL")
 	logInterval := flags.Duration("log-interval", time.Minute, "TagCount summary interval; zero disables periodic summaries, not final summaries; overrides WHATAP_LOG_INTERVAL")
 	whatapConfig := flags.String("whatap-config", "", "optional whatap properties file; WHATAP_ACCESSKEY and WHATAP_SERVER_HOST environment variables take precedence")
-	tagcountQueue := flags.Int("tagcount-queue", 1024, "maximum queued TagCount windows (1..16384); overflow is counted")
+	tagcountQueue := flags.Int("tagcount-queue", 1024, "maximum queued TagCount records (1..16384); detailed overflow is counted, topology summaries wait for room")
 	tagcountTimeout := flags.Duration("tagcount-timeout", 5*time.Second, "whole TagCount connect/handshake/write deadline")
 	tagcountDrain := flags.Duration("tagcount-drain-timeout", 5*time.Second, "maximum shutdown wait for TagCount writes")
 	nodeName := flags.String("node-name", os.Getenv("NODE_NAME"), "node identity for eBPF observations")
@@ -80,7 +80,7 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	topologySummary := flags.Bool("topology-summary", false, "opt in to workload relationship TagCount summaries and read-only ReplicaSet/Job informers; overrides WHATAP_TOPOLOGY_SUMMARY")
 	topologyCluster := flags.String("topology-cluster-id", "", "cluster name shared by all observers; defaults to the access key's project code (one WhaTap Kubernetes project monitors one cluster); overrides WHATAP_TOPOLOGY_CLUSTER_ID")
 	topologyWindow := flags.Duration("topology-window", time.Minute, "relationship summary window; does not change the raw flow window; overrides WHATAP_TOPOLOGY_WINDOW")
-	topologyMaxEntries := flags.Int("topology-max-entries", 4096, "maximum active relationship/window entries (1..65536); saturation fails explicitly; overrides WHATAP_TOPOLOGY_MAX_ENTRIES")
+	topologyMaxEntries := flags.Int("topology-max-entries", 4096, "maximum active relationship/window entries, and of summaries waiting for the TagCount queue (1..65536); exceeding either fails explicitly; overrides WHATAP_TOPOLOGY_MAX_ENTRIES")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

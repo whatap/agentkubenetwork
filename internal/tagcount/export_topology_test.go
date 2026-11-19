@@ -118,7 +118,9 @@ func TestExportTopologyRejectsMalformedWithoutEnqueue(t *testing.T) {
 	}
 }
 
-func TestExportTopologyQueueLossIsBoundedAndReportedOnClose(t *testing.T) {
+// A full queue must not thin a summary window: the exporter refuses the summary
+// and counts no loss, so the caller can offer it again.
+func TestExportTopologyFullQueueRefusesWithoutCountingLoss(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		release := make(chan struct{})
 		sender := &exporterTestSender{closed: make(chan struct{}), send: func(ctx context.Context, _ *pack.TagCountPack) error {
@@ -134,29 +136,32 @@ func TestExportTopologyQueueLossIsBoundedAndReportedOnClose(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer e.Close()
-		if err := exportTopologyForTest(t, e, topologyTestSummary()); err != nil {
-			t.Fatal(err)
-		}
-		synctest.Wait()
-		for i := 0; i < 3; i++ {
+		// The sender holds the first summary; the second fills the queue.
+		for i := 0; i < 2; i++ {
 			if err := exportTopologyForTest(t, e, topologyTestSummary()); err != nil {
 				t.Fatal(err)
 			}
+			synctest.Wait()
+		}
+		for i := 0; i < 2; i++ {
+			if err := exportTopologyForTest(t, e, topologyTestSummary()); !errors.Is(err, topology.ErrNotQueued) {
+				t.Fatalf("a full queue must refuse the summary: %v", err)
+			}
 		}
 		got := e.Snapshot()
-		if got.Queued != 2 || got.Dropped != 2 || got.Pending != 2 || got.Written != 0 || e.Dropped() != 2 {
-			t.Fatalf("topology queue was not bounded: %+v", got)
+		if got.Queued != 2 || got.Dropped != 0 || got.Pending != 2 || got.Written != 0 || e.Dropped() != 0 || e.Err() != nil {
+			t.Fatalf("a refused summary was counted or became terminal: %+v", got)
 		}
 		close(release)
-		closeErr := e.Close()
-		if !errors.Is(closeErr, ErrQueueLoss) {
-			t.Fatalf("Close hid topology queue loss: %v", closeErr)
+		synctest.Wait()
+		if err := exportTopologyForTest(t, e, topologyTestSummary()); err != nil {
+			t.Fatalf("the summary was refused after the queue drained: %v", err)
 		}
-		if got := e.Snapshot(); got.Written != 2 || got.Pending != 0 || got.Failed != 0 || got.Dropped != 2 {
+		if err := e.Close(); err != nil {
+			t.Fatalf("refusals were reported as queue loss: %v", err)
+		}
+		if got := e.Snapshot(); got.Queued != 3 || got.Written != 3 || got.Pending != 0 || got.Failed != 0 || got.Dropped != 0 {
 			t.Fatalf("incorrect topology drain accounting: %+v", got)
-		}
-		if e.Close() != closeErr {
-			t.Fatal("repeat Close changed terminal queue loss")
 		}
 	})
 }
@@ -274,5 +279,22 @@ func TestExportTopologyConcurrentClose(t *testing.T) {
 	group.Wait()
 	if got := e.Snapshot(); got.Queued == 0 || got.Queued != got.Written || got.Failed != 0 || got.Pending != 0 || got.Dropped != 0 {
 		t.Fatalf("incoherent concurrent topology accounting: %+v", got)
+	}
+}
+
+// One flush may queue at most half of the queue as summaries.
+func TestExporterTopologyBurstIsHalfOfTheQueue(t *testing.T) {
+	for capacity, want := range map[int]int{1: 1, 2: 1, 3: 1, 16: 8, 1024: 512, MaxQueueCapacity: MaxQueueCapacity / 2} {
+		sender := &exporterTestSender{closed: make(chan struct{}), send: func(context.Context, *pack.TagCountPack) error { return nil }}
+		e, err := NewExporter(sender, ExporterConfig{NodeName: "node", QueueCapacity: capacity, DrainTimeout: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := e.TopologyBurst(); got != want {
+			t.Errorf("queue %d: burst %d; want %d", capacity, got, want)
+		}
+		if err := e.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

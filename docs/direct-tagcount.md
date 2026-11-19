@@ -58,7 +58,7 @@ sudo ./bin/agentkubenetwork \
 - `-window`는 직접 전송 시 1ms~60s 범위의 정수 밀리초여야 한다.
 - 창이 완료되기 전에 종료하면 `partial`로 남으며 보내지 않는다. 너무 짧은 수집 시간에 `written=0`인 것은 연결 실패의 증거가 아니다.
 - 기본 `-stdout=auto`는 TagCount 전송 시 중복 JSONL을 끈다. `-stdout=jsonl`로 복원한다. `-log-level=info -log-interval=1m`은 stderr 주기 요약이며, `0` 또는 warn/error에서는 주기 요약만 끈다. 종료 요약과 fatal 오류는 항상 유지한다. [로그 설정](logging.md)을 참고한다. `both`의 raw TCP 진단에는 command line이 포함될 수 있으나 TagCount에는 보내지 않는다.
-- `-output-queue`와 `-output-drain-timeout`은 JSONL용이다. 전송 큐/제한 시간과 별개이며 종료 대기 시간이 합산될 수 있다.
+- `-output-queue`와 `-output-drain-timeout`은 JSONL용이다. 전송 큐/제한 시간과 별개이며 종료 대기 시간이 합산될 수 있다. topology 요약을 켜면 `-output-drain-timeout`은 종료할 때 남은 요약 행을 전송 큐에 넣는 대기에도 쓰인다.
 
 ## 팩 계약
 
@@ -81,7 +81,7 @@ sudo ./bin/agentkubenetwork \
 - 이 방식은 기존 WhaTap의 **AES-ECB 호환 프로토콜이지 TLS나 인증 암호화(AEAD)가 아니다**. `secure`라는 원본 패키지 이름만으로 현대적인 전송 보안이 보장된다고 해석하지 않는다. 승인된 네트워크 경계에서만 사용한다.
 - 아직 데이터 팩을 쓰지 않은 연결·협상 단계에서만 설정된 다른 서버를 시도할 수 있다. 전체 연결·협상·쓰기에는 요청 제한 시간이 적용된다.
 - 전송 오류는 수집 경로에 전파되고 nonzero 종료한다. 쓰기 후 결과가 불명확한 팩을 자동 재전송하지 않는다. 지속 재시도, 디스크 버퍼, exactly-once는 제공하지 않는다.
-- 큐는 기본 1,024개, 최대 16,384개다. 꽉 차면 수집 루프를 대기시키지 않고 창을 누락 계수한다. JSONL의 `network.tagcount.drop/v1alpha1`과 최종 요약으로 보고하며, 큐 손실이 있으면 종료 결과도 nonzero다.
+- 큐는 기본 1,024개, 최대 16,384개다. 꽉 차면 수집 루프를 대기시키지 않고 창을 누락 계수한다. JSONL의 `network.tagcount.drop/v1alpha1`과 최종 요약으로 보고하며, 큐 손실이 있으면 종료 결과도 nonzero다. opt-in topology 요약 행은 예외다. 누락시키지 않고 자리가 날 때 다시 넣는다([토폴로지 TagCount 계약](topology-tagcount.md)).
 - 종료 제한 시간 초과 시 네트워크 작업을 취소하고 연결을 닫는다. 남아 있는 창을 성공으로 세지 않는다.
 - 수집 취소로 직접 닫은 ring reader의 `os.ErrClosed`는 정상 종료로 처리한다. 중단 요청 전 발생한 닫힘 오류와 다른 읽기 오류는 숨기지 않는다.
 - `-stdout=jsonl`이면 export가 창을 거절해도 해당 창과 이미 drain한 같은 배치의 나머지 JSONL 기록을 먼저 큐에 남긴다. 첫 거절 뒤 같은 배치를 추가 전송하지 않으며, JSONL 큐·drain 한계는 그대로 적용된다.
@@ -94,7 +94,7 @@ sudo ./bin/agentkubenetwork \
 | `written` | TCP 쓰기가 오류 없이 끝난 레코드; **서버 저장/ACK가 아님** |
 | `failed` | 전송 시도에서 오류가 난 레코드; 수신 여부가 불명확할 수 있음 |
 | `pending` | 큐에 들어갔지만 쓰기 완료/실패로 아직 분류되지 않은 레코드 |
-| `dropped` | 큐 초과로 들어가지 못한 레코드 |
+| `dropped` | 큐 초과로 들어가지 못한 레코드(다시 넣는 topology 요약 행은 제외) |
 | `skipped_partial`, `skipped_unmeasured`, `skipped_incomplete_tuple` | 계약상 전송 대상이 아닌 창; 포트가 없는 관측도 별도로 계수 |
 
 ## 검증 경계

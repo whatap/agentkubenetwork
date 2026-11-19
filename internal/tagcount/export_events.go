@@ -59,10 +59,19 @@ func (e *Exporter) enqueueLocked(p *pack.TagCountPack) {
 	if id := p.Tags.GetString("record_id"); id != "" {
 		p.Tags.PutString("record_id", id+"."+strconv.FormatUint(e.summary.Queued+e.summary.Dropped+1, 10))
 	}
+	if !e.offerLocked(p) {
+		e.summary.Dropped++
+	}
+}
+
+// offerLocked queues p only when there is room and counts nothing when there
+// is none. It never waits. The caller owns mu.
+func (e *Exporter) offerLocked(p *pack.TagCountPack) bool {
 	select {
 	case e.queue <- p:
 		e.summary.Queued++
+		return true
 	default:
-		e.summary.Dropped++
+		return false
 	}
 }

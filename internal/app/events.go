@@ -46,8 +46,17 @@ type TypedEventExporter interface {
 
 // TopologyExporter shares the bounded queue and lifecycle of WindowExporter.
 // Presence summaries are opt-in and never replace the detailed observations.
+// ExportTopology returns topology.ErrNotQueued when the queue has no room. That
+// is not a loss: the pipeline keeps the summary and offers it again.
 type TopologyExporter interface {
 	ExportTopology(topology.Summary) error
+}
+
+// A TopologyExporter that shares a bounded queue with the detailed records
+// implements topologyBurster, and the pipeline then queues at most that many
+// summaries in one flush.
+type topologyBurster interface {
+	TopologyBurst() int
 }
 
 type EventOptions struct {
