@@ -14,24 +14,25 @@
 -source=ebpf -export=tagcount -output-mode=windows -pod-identity=true
 -window=5s
 -topology-summary
--topology-cluster-id=STABLE_CLUSTER_ID
 -topology-window=1m
 -topology-max-entries=4096
 ```
+
+클러스터 이름을 따로 붙이려면 `-topology-cluster-id=NAME`을 더한다. 생략하면 라이선스의 프로젝트 코드(pcode)를 쓴다.
 
 같은 설정은 다음 환경변수로도 지정할 수 있다. 명시한 CLI 인자는 **항목별로** 환경변수보다 우선하며, 적용되는 값은 CLI와 같은 opt-in·형식·범위 검증을 받는다. 잘못된 환경변수 원문은 오류 로그에 남기지 않는다.
 
 | 환경변수 | 대응 인자 | 기본값 |
 |---|---|---|
 | `WHATAP_TOPOLOGY_SUMMARY` | `-topology-summary` | `false` |
-| `WHATAP_TOPOLOGY_CLUSTER_ID` | `-topology-cluster-id` | 없음; 요약 활성화 시 필수 |
+| `WHATAP_TOPOLOGY_CLUSTER_ID` | `-topology-cluster-id` | 라이선스의 프로젝트 코드(pcode) |
 | `WHATAP_TOPOLOGY_WINDOW` | `-topology-window` | `1m` |
 | `WHATAP_TOPOLOGY_MAX_ENTRIES` | `-topology-max-entries` | `4096` |
 
 Operator가 `networkAgent.env`를 지원하는 배포에서는 기존 CR의 환경변수 목록에 추가한다. 관리되는 DaemonSet 인자를 직접 수정하거나 Operator/CRD를 교체할 필요가 없다. 이 환경변수를 읽는 network-agent 이미지가 필요하며, 기존 환경변수·credentials 참조는 보존한다. 요약을 끌 때는 세부 topology 환경변수도 함께 제거한다. opt-in 없이 세부 설정만 남기면 시작 단계에서 거부한다.
 
 - 기본값은 `-topology-summary=false`다. 기존 배포의 API 권한·송신 category를 자동으로 늘리지 않는다.
-- `cluster_id`는 같은 프로젝트의 서로 다른 클러스터를 분리하는 안정적인 식별자다. 모든 노드에 같은 값을 설정하고, 다른 클러스터에는 다른 값을 쓴다. Node 이름·OID·현재 kube context를 클러스터 UID로 추측하지 않는다.
+- `cluster_id`는 화면에 표시하는 클러스터 이름이다. WhaTap Kubernetes 프로젝트 하나는 클러스터 하나를 모니터링하므로, 설정하지 않으면 라이선스의 프로젝트 코드(pcode)를 쓴다. 이름을 붙이려면 모든 노드에 같은 값을 설정한다. 명시한 빈 값(빈 환경변수 포함)은 생략이 아니라 오류다. 같은 기간 한 프로젝트에서 값이 둘 이상 관측되면 조회 화면은 쿠버 정보를 붙이지 않는다(`multiple-cluster-ids`). Node 이름·OID·현재 kube context를 클러스터 이름으로 쓰지 않는다.
 - 요약 창은 1ms~60s의 정수 밀리초이며 상세 flow 창의 배수여야 한다. 기본 요약은 1분, 기존 상세는 5초다. 화면 조회 범위와 수집 창은 별개다.
 - max entries는 **모든 활성 시간 창의 연결 키 합계**다. 범위는 1~65,536. 초과하면 오류를 전파하고 중단하며, 일부 관계만으로 완전한 맵이 만들어졌다고 보고하지 않는다.
 - summary도 기존 bounded 전송 큐·timeout·drain·실패 진단을 사용한다. `written`은 TCP write 완료이며 저장 ACK가 아니다.

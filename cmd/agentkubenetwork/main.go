@@ -78,7 +78,7 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig for Pod identity; empty uses in-cluster configuration only")
 	podSyncTimeout := flags.Duration("pod-sync-timeout", 10*time.Second, "Pod informer startup sync and shutdown bound")
 	topologySummary := flags.Bool("topology-summary", false, "opt in to workload relationship TagCount summaries and read-only ReplicaSet/Job informers; overrides WHATAP_TOPOLOGY_SUMMARY")
-	topologyCluster := flags.String("topology-cluster-id", "", "stable cluster identity shared by all observers; required with -topology-summary; overrides WHATAP_TOPOLOGY_CLUSTER_ID")
+	topologyCluster := flags.String("topology-cluster-id", "", "cluster name shared by all observers; defaults to the access key's project code (one WhaTap Kubernetes project monitors one cluster); overrides WHATAP_TOPOLOGY_CLUSTER_ID")
 	topologyWindow := flags.Duration("topology-window", time.Minute, "relationship summary window; does not change the raw flow window; overrides WHATAP_TOPOLOGY_WINDOW")
 	topologyMaxEntries := flags.Int("topology-max-entries", 4096, "maximum active relationship/window entries (1..65536); saturation fails explicitly; overrides WHATAP_TOPOLOGY_MAX_ENTRIES")
 	if err := flags.Parse(args); err != nil {
@@ -96,14 +96,17 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 	if err := validateLogging(*logLevel, *logInterval); err != nil {
 		return err
 	}
-	var podIdentitySet, podSyncTimeoutSet, topologyOptionsSet bool
+	var podIdentitySet, podSyncTimeoutSet, topologyOptionsSet, topologyClusterSet bool
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "pod-identity":
 			podIdentitySet = true
 		case "pod-sync-timeout":
 			podSyncTimeoutSet = true
-		case "topology-cluster-id", "topology-window", "topology-max-entries":
+		case "topology-cluster-id":
+			topologyClusterSet = true
+			topologyOptionsSet = true
+		case "topology-window", "topology-max-entries":
 			topologyOptionsSet = true
 		}
 	})
@@ -121,12 +124,16 @@ func runArgs(args []string, input io.Reader, output io.Writer, open bpfOpener) e
 		if !*podIdentity {
 			return errors.New("topology summary requires -pod-identity")
 		}
-		if len(*topologyCluster) == 0 || len(*topologyCluster) > 253 {
-			return errors.New("topology-cluster-id must contain 1..253 printable non-whitespace ASCII bytes")
-		}
-		for _, c := range *topologyCluster {
-			if c < 33 || c > 126 {
+		// Unset means the project code, filled in once the access key is parsed.
+		// A value that was given, including an empty one, must be a valid name.
+		if topologyClusterSet {
+			if len(*topologyCluster) == 0 || len(*topologyCluster) > 253 {
 				return errors.New("topology-cluster-id must contain 1..253 printable non-whitespace ASCII bytes")
+			}
+			for _, c := range *topologyCluster {
+				if c < 33 || c > 126 {
+					return errors.New("topology-cluster-id must contain 1..253 printable non-whitespace ASCII bytes")
+				}
 			}
 		}
 		if *topologyWindow < time.Millisecond || *topologyWindow > time.Minute || *topologyWindow%time.Millisecond != 0 || *windowSize <= 0 || *topologyWindow%*windowSize != 0 {

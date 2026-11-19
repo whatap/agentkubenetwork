@@ -17,7 +17,7 @@ func TestCLITopologyRequiresExplicitSafeConfiguration(t *testing.T) {
 		{"stdin", []string{"-topology-summary"}, "topology summary requires -source=ebpf"},
 		{"no export", []string{"-source=ebpf", "-topology-summary"}, "topology summary requires -export=tagcount"},
 		{"no identity", []string{"-source=ebpf", "-export=tagcount", "-pod-identity=false", "-topology-summary"}, "topology summary requires -pod-identity"},
-		{"no cluster", []string{"-source=ebpf", "-export=tagcount", "-topology-summary"}, "topology-cluster-id"},
+		{"empty cluster", []string{"-source=ebpf", "-export=tagcount", "-topology-summary", "-topology-cluster-id="}, "topology-cluster-id"},
 		{"oversized window", []string{"-source=ebpf", "-export=tagcount", "-topology-summary", "-topology-cluster-id=cluster-a", "-topology-window=2m"}, "topology window"},
 		{"fractional ms", []string{"-source=ebpf", "-export=tagcount", "-topology-summary", "-topology-cluster-id=cluster-a", "-topology-window=1500us"}, "topology window"},
 		{"zero bound", []string{"-source=ebpf", "-export=tagcount", "-topology-summary", "-topology-cluster-id=cluster-a", "-topology-max-entries=0"}, "topology max entries"},

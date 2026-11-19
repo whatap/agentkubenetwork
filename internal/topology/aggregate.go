@@ -18,8 +18,10 @@ const (
 	DirectionRequest      = "request"
 )
 
-// Config has no defaults. ClusterID is an explicit cluster boundary, never a
-// node name, project code or storage OID.
+// Config has no defaults; callers resolve them. ClusterID names the cluster in
+// every summary. One WhaTap Kubernetes project monitors one cluster, so the
+// agent defaults it to the license project code. It is never a node name or
+// storage OID.
 type Config struct {
 	ClusterID  string
 	WindowSize time.Duration

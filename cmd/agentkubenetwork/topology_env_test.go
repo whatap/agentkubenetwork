@@ -74,7 +74,7 @@ func TestCLITopologyEnvironmentValidationBeforeIO(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "missing cluster", env: map[string]string{"WHATAP_TOPOLOGY_SUMMARY": "true"}, want: "topology-cluster-id"},
+		{name: "empty cluster", env: map[string]string{"WHATAP_TOPOLOGY_SUMMARY": "true", "WHATAP_TOPOLOGY_CLUSTER_ID": ""}, want: "topology-cluster-id"},
 		{name: "unused cluster", env: map[string]string{"WHATAP_TOPOLOGY_CLUSTER_ID": "cluster-a"}, want: "requires -topology-summary"},
 		{name: "bad boolean", env: map[string]string{"WHATAP_TOPOLOGY_SUMMARY": "private-value"}, want: "WHATAP_TOPOLOGY_SUMMARY"},
 		{name: "empty boolean", env: map[string]string{"WHATAP_TOPOLOGY_SUMMARY": ""}, want: "WHATAP_TOPOLOGY_SUMMARY"},
